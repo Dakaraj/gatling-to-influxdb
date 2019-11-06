@@ -23,10 +23,8 @@ THE SOFTWARE.
 package cmd
 
 import (
-	"fmt"
-	"os"
-
-	"github.com/dakaraj/gatling-to-influxdb/validation"
+	"github.com/dakaraj/gatling-to-influxdb/logger"
+	"github.com/dakaraj/gatling-to-influxdb/parser"
 	"github.com/spf13/cobra"
 )
 
@@ -36,33 +34,39 @@ var (
 	port     uint16
 	username string
 	password string
+
+	l = logger.GetLogger()
 )
 
 // rootCmd represents the base command when called without any subcommands
 var rootCmd = &cobra.Command{
-	Use:   "g2i path/to/logfile",
+	Use: "g2i target/directory/path",
+	Example: `g2i ./target
+
+Will first wait for directory to appear if not exists yet.
+Then will search for the latest results directory or wait for it to appear.
+Next will search for simulation.log file to appear and start processing it.`,
 	Short: "Write Gatling logs directly to InfluxDB",
 	Long: `This application allows writing raw Gatling load testing
 tool logs directly to InfluxDB avoiding unnecessary
 complications of Graphite protocol.`,
 	Version: "v0.0.1",
-	Args:    validation.ValidateArgs,
-	Run:     func(cmd *cobra.Command, args []string) {},
+	PreRunE: verifyInfluxDBConnection,
+	Args:    cobra.ExactArgs(1),
+	Run:     parser.RunMain,
 }
 
 // Execute adds all child commands to the root command and sets flags appropriately.
 // This is called by main.main(). It only needs to happen once to the rootCmd.
 func Execute() {
 	if err := rootCmd.Execute(); err != nil {
-		fmt.Println(err)
-		os.Exit(1)
+		l.Fatalln(err)
 	}
 }
 
 func init() {
 	rootCmd.Flags().BoolVarP(&detached, "detach", "d", false, "Run application in background. Returns [PID] on start")
-	rootCmd.Flags().StringVarP(&address, "address", "a", "http://localhost", "HTTP address of InfluxDB instance")
-	rootCmd.Flags().Uint16VarP(&port, "port", "p", 8088, "Port of InfluxDB instance")
-	rootCmd.Flags().StringVar(&username, "username", "", "Username credential for InfluxDB instance")
-	rootCmd.Flags().StringVar(&password, "password", "", "password credential for InfluxDB instance")
+	rootCmd.Flags().StringVarP(&address, "address", "a", "http://localhost:8086", "HTTP address and port of InfluxDB instance")
+	rootCmd.Flags().StringVarP(&username, "username", "u", "", "Username credential for InfluxDB instance")
+	rootCmd.Flags().StringVarP(&password, "password", "p", "", "password credential for InfluxDB instance")
 }
