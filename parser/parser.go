@@ -1,8 +1,10 @@
 package parser
 
 import (
+	"bufio"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -12,9 +14,15 @@ import (
 	"github.com/spf13/cobra"
 )
 
+const (
+	// defines how long will file parser wait for new line before
+	// stopping process (minutes)
+	waitTime = 5
+)
+
 var (
 	l     = logger.GetLogger()
-	re    = regexp.MustCompile(`.+?-(\d{14})`)
+	re    = regexp.MustCompile(`^.+?-(\d{14})\d{3}$`)
 	start = time.Now().Unix()
 
 	errFound = errors.New("Found")
@@ -102,6 +110,48 @@ func waitForLog() error {
 	return nil
 }
 
+func parseLoop(file *os.File) error {
+	r := bufio.NewReader(file)
+	var buf []byte
+	startWait := time.Now()
+	for {
+		b, err := r.ReadBytes('\n')
+		if err == io.EOF {
+			if time.Now().After(startWait.Add(time.Duration(waitTime) * time.Minute)) {
+				l.Printf("No new lines found for %d minutes. Stopping application...", waitTime)
+				break
+			}
+			buf = append(buf, b...)
+			// l.Printf("Encountered EOF. Waiting for more data\n")
+			time.Sleep(time.Second * 2)
+			continue
+		}
+		if err != nil && err != io.EOF {
+			return fmt.Errorf("Unexpected error encountered while parsing file: %v", err)
+		}
+		buf = append(buf, b...)
+		// TODO: STRING PROCESSING HERE
+		buf = []byte{}
+		startWait = time.Now()
+	}
+
+	return nil
+}
+
+func parseStart() error {
+	file, err := os.Open(logDir + "/simulation.log")
+	if err != nil {
+		return err
+	}
+	defer file.Close()
+
+	if err = parseLoop(file); err != nil {
+		return err
+	}
+
+	return nil
+}
+
 // RunMain performs main application logic
 func RunMain(cmd *cobra.Command, args []string) {
 	l.Printf("Searching for gatling directory at %s", args[0])
@@ -115,5 +165,7 @@ func RunMain(cmd *cobra.Command, args []string) {
 	if err := waitForLog(); err != nil {
 		l.Fatalf("Failed waiting for simulation.log with error: %v\n", err)
 	}
-
+	if err := parseStart(); err != nil {
+		l.Fatalf("Failed reading simulation.log: %v\n", err)
+	}
 }

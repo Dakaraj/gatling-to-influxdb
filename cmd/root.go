@@ -35,8 +35,6 @@ import (
 )
 
 var (
-	detached bool
-
 	l = logger.GetLogger()
 )
 
@@ -54,7 +52,7 @@ tool logs directly to InfluxDB avoiding unnecessary
 complications of Graphite protocol.`,
 	Version: "v0.0.1",
 	PreRunE: func(cmd *cobra.Command, args []string) error {
-		if detached {
+		if d, _ := cmd.Flags().GetBool("detach"); d {
 			newArgs := make([]string, 0, len(os.Args))
 			for i, a := range os.Args {
 				if strings.HasPrefix(a, "-d") || i == 0 {
@@ -86,7 +84,7 @@ func Execute() {
 }
 
 func init() {
-	rootCmd.Flags().BoolVarP(&detached, "detach", "d", false, "Run application in background. Returns [PID] on start")
+	rootCmd.Flags().BoolP("detach", "d", false, "Run application in background. Returns [PID] on start")
 	rootCmd.Flags().StringP("address", "a", "http://localhost:8086", "HTTP address and port of InfluxDB instance")
 	rootCmd.Flags().StringP("username", "u", "", "Username credential for InfluxDB instance")
 	rootCmd.Flags().StringP("password", "p", "", "Password credential for InfluxDB instance")
