@@ -104,7 +104,6 @@ func waitForLog() error {
 
 // RunMain performs main application logic
 func RunMain(cmd *cobra.Command, args []string) {
-	l.Println("Starting application...")
 	l.Printf("Searching for gatling directory at %s", args[0])
 	dir := args[0] + "/gatling"
 	if err := lookupTargetDir(dir); err != nil {

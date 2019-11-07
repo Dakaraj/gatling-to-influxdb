@@ -23,6 +23,12 @@ THE SOFTWARE.
 package cmd
 
 import (
+	"fmt"
+	"os"
+	"os/exec"
+	"strings"
+
+	"github.com/dakaraj/gatling-to-influxdb/client"
 	"github.com/dakaraj/gatling-to-influxdb/logger"
 	"github.com/dakaraj/gatling-to-influxdb/parser"
 	"github.com/spf13/cobra"
@@ -30,10 +36,6 @@ import (
 
 var (
 	detached bool
-	address  string
-	port     uint16
-	username string
-	password string
 
 	l = logger.GetLogger()
 )
@@ -51,9 +53,28 @@ Next will search for simulation.log file to appear and start processing it.`,
 tool logs directly to InfluxDB avoiding unnecessary
 complications of Graphite protocol.`,
 	Version: "v0.0.1",
-	PreRunE: verifyInfluxDBConnection,
-	Args:    cobra.ExactArgs(1),
-	Run:     parser.RunMain,
+	PreRunE: func(cmd *cobra.Command, args []string) error {
+		if detached {
+			newArgs := make([]string, 0, len(os.Args))
+			for i, a := range os.Args {
+				if strings.HasPrefix(a, "-d") || i == 0 {
+					continue
+				}
+				newArgs = append(newArgs, a)
+			}
+			command := exec.Command(os.Args[0], newArgs...)
+			if err := command.Run(); err != nil {
+				return err
+			}
+			pid := command.Process.Pid
+			fmt.Println("Started background process with [PID]:", pid)
+			os.Exit(0)
+		}
+		l.Println("Starting application...")
+		return client.SetUpInfluxConnection(cmd)
+	},
+	Args: cobra.ExactArgs(1),
+	Run:  parser.RunMain,
 }
 
 // Execute adds all child commands to the root command and sets flags appropriately.
@@ -66,7 +87,8 @@ func Execute() {
 
 func init() {
 	rootCmd.Flags().BoolVarP(&detached, "detach", "d", false, "Run application in background. Returns [PID] on start")
-	rootCmd.Flags().StringVarP(&address, "address", "a", "http://localhost:8086", "HTTP address and port of InfluxDB instance")
-	rootCmd.Flags().StringVarP(&username, "username", "u", "", "Username credential for InfluxDB instance")
-	rootCmd.Flags().StringVarP(&password, "password", "p", "", "password credential for InfluxDB instance")
+	rootCmd.Flags().StringP("address", "a", "http://localhost:8086", "HTTP address and port of InfluxDB instance")
+	rootCmd.Flags().StringP("username", "u", "", "Username credential for InfluxDB instance")
+	rootCmd.Flags().StringP("password", "p", "", "Password credential for InfluxDB instance")
+	rootCmd.Flags().StringP("database", "b", "gatling", "Name of the database in InfluxDB")
 }
