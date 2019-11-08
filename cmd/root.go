@@ -27,6 +27,7 @@ import (
 	"os"
 	"os/exec"
 	"strings"
+	"time"
 
 	"github.com/dakaraj/gatling-to-influxdb/client"
 	"github.com/dakaraj/gatling-to-influxdb/logger"
@@ -37,6 +38,38 @@ import (
 var (
 	l = logger.GetLogger()
 )
+
+func preRunSetup(cmd *cobra.Command, args []string) error {
+	// Wrorkaround for a mandatory testid (t) flag
+	if t, _ := cmd.Flags().GetString("testid"); t == "" {
+		l.Fatalln("Test identificator is not provided. Please provide some value with --testid (-t) flag")
+	}
+	// End of workaround
+
+	if d, _ := cmd.Flags().GetBool("detach"); d {
+		newArgs := make([]string, 0, len(os.Args))
+		for i, a := range os.Args {
+			if strings.HasPrefix(a, "-d") || i == 0 {
+				continue
+			}
+			newArgs = append(newArgs, a)
+		}
+		command := exec.Command(os.Args[0], newArgs...)
+		if err := command.Run(); err != nil {
+			return err
+		}
+		pid := command.Process.Pid
+		fmt.Println("Started background process with [PID]:", pid)
+		os.Exit(0)
+	}
+	if tid, _ := cmd.Flags().GetString("testid"); tid == "" {
+		tid = fmt.Sprintf("%s-gatling-simulation", time.Now().Format("0201-150405"))
+		cmd.Flags().Set("testid", tid)
+	}
+
+	l.Println("Starting application...")
+	return client.SetUpInfluxConnection(cmd)
+}
 
 // rootCmd represents the base command when called without any subcommands
 var rootCmd = &cobra.Command{
@@ -51,28 +84,9 @@ Next will search for simulation.log file to appear and start processing it.`,
 tool logs directly to InfluxDB avoiding unnecessary
 complications of Graphite protocol.`,
 	Version: "v0.0.1",
-	PreRunE: func(cmd *cobra.Command, args []string) error {
-		if d, _ := cmd.Flags().GetBool("detach"); d {
-			newArgs := make([]string, 0, len(os.Args))
-			for i, a := range os.Args {
-				if strings.HasPrefix(a, "-d") || i == 0 {
-					continue
-				}
-				newArgs = append(newArgs, a)
-			}
-			command := exec.Command(os.Args[0], newArgs...)
-			if err := command.Run(); err != nil {
-				return err
-			}
-			pid := command.Process.Pid
-			fmt.Println("Started background process with [PID]:", pid)
-			os.Exit(0)
-		}
-		l.Println("Starting application...")
-		return client.SetUpInfluxConnection(cmd)
-	},
-	Args: cobra.ExactArgs(1),
-	Run:  parser.RunMain,
+	PreRunE: preRunSetup,
+	Args:    cobra.ExactArgs(1),
+	Run:     parser.RunMain,
 }
 
 // Execute adds all child commands to the root command and sets flags appropriately.
@@ -89,4 +103,8 @@ func init() {
 	rootCmd.Flags().StringP("username", "u", "", "Username credential for InfluxDB instance")
 	rootCmd.Flags().StringP("password", "p", "", "Password credential for InfluxDB instance")
 	rootCmd.Flags().StringP("database", "b", "gatling", "Name of the database in InfluxDB")
+	rootCmd.Flags().StringP("testid", "t", "", "Unique test identificator (REQUIRED)")
+	// Seems like an issue: https://github.com/spf13/cobra/issues/655
+	// This mark does not work but let it stay here
+	rootCmd.MarkFlagRequired("testid")
 }

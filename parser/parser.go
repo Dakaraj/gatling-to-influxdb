@@ -2,13 +2,17 @@ package parser
 
 import (
 	"bufio"
+	"bytes"
 	"errors"
 	"fmt"
 	"io"
 	"os"
 	"path/filepath"
 	"regexp"
+	"strconv"
 	"time"
+
+	infc "github.com/influxdata/influxdb1-client/v2"
 
 	"github.com/dakaraj/gatling-to-influxdb/logger"
 	"github.com/spf13/cobra"
@@ -21,12 +25,24 @@ const (
 )
 
 var (
-	l     = logger.GetLogger()
-	re    = regexp.MustCompile(`^.+?-(\d{14})\d{3}$`)
-	start = time.Now().Unix()
+	l        = logger.GetLogger()
+	re       = regexp.MustCompile(`^.+?-(\d{14})\d{3}$`)
+	start    = time.Now().Unix()
+	nodeName string
 
 	errFound = errors.New("Found")
 	logDir   string
+	testID   string
+
+	tabSep = []byte{9}
+
+	// regular expression patterns for matching log strings
+	userLine    = regexp.MustCompile(`^USER\s`)
+	requestLine = regexp.MustCompile(`^REQUEST\s`)
+	groupLine   = regexp.MustCompile(`GROUP\s`)
+	runLine     = regexp.MustCompile(`^RUN\s`)
+
+	users = make(map[string]int)
 )
 
 func lookupTargetDir(dir string) error {
@@ -110,6 +126,170 @@ func waitForLog() error {
 	return nil
 }
 
+// TODO: Remove
+// print array of byte arrays
+func printByteSlices(bs [][]byte) {
+	ss := make([]string, 0, len(bs))
+	for _, s := range bs {
+		ss = append(ss, fmt.Sprintf(`"%s"`, s))
+	}
+	fmt.Println(ss)
+}
+
+func timeFromUnixBytes(ub []byte) time.Time {
+	timeStamp, _ := strconv.ParseInt(string(ub), 10, 64)
+	return time.Unix(0, timeStamp*1000000)
+}
+
+func userLineProcess(lb []byte) {
+	split := bytes.Split(lb, tabSep)
+	scenario := string(split[1])
+	// TODO: Remove
+	// printByteSlices(split)
+
+	switch status := string(split[3]); status {
+	case "START":
+		users[scenario]++
+	case "END":
+		users[scenario]--
+	}
+
+	// TODO: think of some logic that will send this values every N seconds
+	// instead of every change
+	point, err := infc.NewPoint(
+		"virtualUsers",
+		map[string]string{
+			"scenario": scenario,
+			"testId":   testID,
+		},
+		map[string]interface{}{
+			"currentActive": users[scenario],
+			"nodeName":      nodeName,
+		},
+		timeFromUnixBytes(bytes.TrimSpace(split[5])),
+	)
+	if err != nil {
+		l.Printf("Error creating new point: %v\n", err)
+	}
+	// TODO: Remove
+	_ = point
+}
+
+func requestLineProcess(lb []byte) {
+	split := bytes.Split(lb, tabSep)
+	// TODO: Remove
+	// printByteSlices(split)
+
+	userID, _ := strconv.ParseInt(string(split[1]), 10, 32)
+	start, _ := strconv.ParseInt(string(split[4]), 10, 64)
+	stop, _ := strconv.ParseInt(string(split[5]), 10, 64)
+	point, err := infc.NewPoint(
+		"rawRequests",
+		map[string]string{
+			"requestName": string(split[3]),
+			"groups":      string(split[2]),
+			"result":      string(split[6]),
+			"testId":      testID,
+		},
+		map[string]interface{}{
+			"userId":       int(userID),
+			"duration":     int(stop - start),
+			"nodeName":     nodeName,
+			"errorMessage": string(bytes.TrimSpace(split[7])),
+		},
+		timeFromUnixBytes(split[5]),
+	)
+	if err != nil {
+		l.Printf("Error creating new point: %v\n", err)
+	}
+	_ = point
+	// TODO: Remove
+	// p, _ := point.Fields()
+	// fmt.Println(point.Time())
+	// fmt.Printf("%#v\n", p)
+	// fmt.Printf("%#v\n", point.Tags())
+	// TODO: Send to client for processing
+}
+
+func groupLineProcess(lb []byte) {
+	split := bytes.Split(lb, tabSep)
+	// printByteSlices(split)
+
+	userID, _ := strconv.ParseInt(string(split[1]), 10, 32)
+	start, _ := strconv.ParseInt(string(split[3]), 10, 64)
+	stop, _ := strconv.ParseInt(string(split[4]), 10, 64)
+	duration, _ := strconv.ParseInt(string(split[5]), 10, 32)
+	point, err := infc.NewPoint(
+		"groups",
+		map[string]string{
+			"name":   string(split[2]),
+			"result": string(split[6][:2]),
+			"testId": testID,
+		},
+		map[string]interface{}{
+			"userId":        int(userID),
+			"totalDuration": int(stop - start),
+			"duration":      int(duration),
+			"nodeName":      nodeName,
+		},
+		timeFromUnixBytes(split[4]),
+	)
+	if err != nil {
+		l.Printf("Error creating new point: %v\n", err)
+	}
+	_ = point
+	// TODO: Remove
+	p, _ := point.Fields()
+	fmt.Println(point.Time())
+	fmt.Printf("%#v\n", p)
+	fmt.Printf("%#v\n", point.Tags())
+	// TODO: Send to client for processing
+}
+
+func runLineProcess(lb []byte) {
+	split := bytes.Split(lb, tabSep)
+	// simulationName := split[1]
+	// startPoint := timeFromUnixBytes(split[3])
+
+	point, err := infc.NewPoint(
+		"testStartEnd",
+		map[string]string{
+			"action":         "start",
+			"testId":         testID,
+			"simulationName": string(split[1]),
+		},
+		map[string]interface{}{
+			"description": string(split[4]),
+			"nodeName":    nodeName,
+		},
+		timeFromUnixBytes(split[3]),
+	)
+	if err != nil {
+		l.Printf("Error creating new point: %v\n", err)
+	}
+	_ = point
+	// TODO: Remove
+	// p, _ := point.Fields()
+	// fmt.Printf("%#v\n", p)
+	// fmt.Printf("%#v\n", point.Tags())
+	// TODO: Send to client for processing
+}
+
+func stringProcessor(line []byte) error {
+	switch {
+	case userLine.Match(line):
+		userLineProcess(line)
+	case requestLine.Match(line):
+		requestLineProcess(line)
+	case groupLine.Match(line):
+		groupLineProcess(line)
+	case runLine.Match(line):
+		runLineProcess(line)
+	}
+
+	return nil
+}
+
 func parseLoop(file *os.File) error {
 	r := bufio.NewReader(file)
 	var buf []byte
@@ -131,6 +311,7 @@ func parseLoop(file *os.File) error {
 		}
 		buf = append(buf, b...)
 		// TODO: STRING PROCESSING HERE
+		stringProcessor(buf)
 		buf = []byte{}
 		startWait = time.Now()
 	}
@@ -154,6 +335,8 @@ func parseStart() error {
 
 // RunMain performs main application logic
 func RunMain(cmd *cobra.Command, args []string) {
+	testID, _ = cmd.Flags().GetString("testid")
+	nodeName, _ = os.Hostname()
 	l.Printf("Searching for gatling directory at %s", args[0])
 	dir := args[0] + "/gatling"
 	if err := lookupTargetDir(dir); err != nil {

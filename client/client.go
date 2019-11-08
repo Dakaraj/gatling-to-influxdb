@@ -2,6 +2,7 @@ package client
 
 import (
 	"fmt"
+	"runtime"
 	"time"
 
 	"github.com/dakaraj/gatling-to-influxdb/logger"
@@ -24,7 +25,7 @@ func SetUpInfluxConnection(cmd *cobra.Command) error {
 		Addr:      address,
 		Username:  username,
 		Password:  password,
-		UserAgent: "g2i-http-client-" + cmd.Version,
+		UserAgent: fmt.Sprintf("g2i-http-client-%s(%s)", cmd.Version, runtime.Version()),
 		Timeout:   time.Second * 60,
 	})
 	if err != nil {
