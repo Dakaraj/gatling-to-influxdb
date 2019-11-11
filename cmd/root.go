@@ -27,7 +27,6 @@ import (
 	"os"
 	"os/exec"
 	"strings"
-	"time"
 
 	"github.com/dakaraj/gatling-to-influxdb/client"
 	"github.com/dakaraj/gatling-to-influxdb/logger"
@@ -37,6 +36,8 @@ import (
 
 var (
 	l = logger.GetLogger()
+
+	stop = make(chan struct{})
 )
 
 func preRunSetup(cmd *cobra.Command, args []string) error {
@@ -62,13 +63,9 @@ func preRunSetup(cmd *cobra.Command, args []string) error {
 		fmt.Println("Started background process with [PID]:", pid)
 		os.Exit(0)
 	}
-	if tid, _ := cmd.Flags().GetString("testid"); tid == "" {
-		tid = fmt.Sprintf("%s-gatling-simulation", time.Now().Format("0201-150405"))
-		cmd.Flags().Set("testid", tid)
-	}
 
 	l.Println("Starting application...")
-	return client.SetUpInfluxConnection(cmd)
+	return client.SetUpInfluxConnection(cmd, stop)
 }
 
 // rootCmd represents the base command when called without any subcommands
@@ -86,7 +83,10 @@ complications of Graphite protocol.`,
 	Version: "v0.0.1",
 	PreRunE: preRunSetup,
 	Args:    cobra.ExactArgs(1),
-	Run:     parser.RunMain,
+	Run: func(cmd *cobra.Command, args []string) {
+		testID, _ := cmd.Flags().GetString("testid")
+		parser.RunMain(testID, args[0], stop)
+	},
 }
 
 // Execute adds all child commands to the root command and sets flags appropriately.

@@ -12,10 +12,11 @@ import (
 	"strconv"
 	"time"
 
+	c "github.com/dakaraj/gatling-to-influxdb/client"
+
 	infc "github.com/influxdata/influxdb1-client/v2"
 
 	"github.com/dakaraj/gatling-to-influxdb/logger"
-	"github.com/spf13/cobra"
 )
 
 const (
@@ -177,8 +178,6 @@ func userLineProcess(lb []byte) {
 
 func requestLineProcess(lb []byte) {
 	split := bytes.Split(lb, tabSep)
-	// TODO: Remove
-	// printByteSlices(split)
 
 	userID, _ := strconv.ParseInt(string(split[1]), 10, 32)
 	start, _ := strconv.ParseInt(string(split[4]), 10, 64)
@@ -202,13 +201,7 @@ func requestLineProcess(lb []byte) {
 	if err != nil {
 		l.Printf("Error creating new point: %v\n", err)
 	}
-	_ = point
-	// TODO: Remove
-	// p, _ := point.Fields()
-	// fmt.Println(point.Time())
-	// fmt.Printf("%#v\n", p)
-	// fmt.Printf("%#v\n", point.Tags())
-	// TODO: Send to client for processing
+	c.PointsChannel <- point
 }
 
 func groupLineProcess(lb []byte) {
@@ -220,7 +213,7 @@ func groupLineProcess(lb []byte) {
 	stop, _ := strconv.ParseInt(string(split[4]), 10, 64)
 	duration, _ := strconv.ParseInt(string(split[5]), 10, 32)
 	point, err := infc.NewPoint(
-		"groups",
+		"rawGroups",
 		map[string]string{
 			"name":   string(split[2]),
 			"result": string(split[6][:2]),
@@ -237,13 +230,7 @@ func groupLineProcess(lb []byte) {
 	if err != nil {
 		l.Printf("Error creating new point: %v\n", err)
 	}
-	_ = point
-	// TODO: Remove
-	p, _ := point.Fields()
-	fmt.Println(point.Time())
-	fmt.Printf("%#v\n", p)
-	fmt.Printf("%#v\n", point.Tags())
-	// TODO: Send to client for processing
+	c.PointsChannel <- point
 }
 
 func runLineProcess(lb []byte) {
@@ -277,10 +264,10 @@ func runLineProcess(lb []byte) {
 
 func stringProcessor(line []byte) error {
 	switch {
-	case userLine.Match(line):
-		userLineProcess(line)
 	case requestLine.Match(line):
 		requestLineProcess(line)
+	case userLine.Match(line):
+		userLineProcess(line)
 	case groupLine.Match(line):
 		groupLineProcess(line)
 	case runLine.Match(line):
@@ -290,65 +277,63 @@ func stringProcessor(line []byte) error {
 	return nil
 }
 
-func parseLoop(file *os.File) error {
+func parseLoop(file *os.File, stop <-chan struct{}) {
 	r := bufio.NewReader(file)
 	var buf []byte
 	startWait := time.Now()
+ParseLoop:
 	for {
-		b, err := r.ReadBytes('\n')
-		if err == io.EOF {
-			if time.Now().After(startWait.Add(time.Duration(waitTime) * time.Minute)) {
-				l.Printf("No new lines found for %d minutes. Stopping application...", waitTime)
-				break
+		select {
+		case <-stop:
+			l.Println("Parser received closing signal. Processing stopped")
+			break ParseLoop
+		default:
+			b, err := r.ReadBytes('\n')
+			if err == io.EOF {
+				if time.Now().After(startWait.Add(time.Duration(waitTime) * time.Minute)) {
+					l.Printf("No new lines found for %d minutes. Stopping application...", waitTime)
+					break ParseLoop
+				}
+				buf = append(buf, b...)
+				// l.Printf("Encountered EOF. Waiting for more data\n")
+				time.Sleep(time.Second * 2)
+				continue
+			}
+			if err != nil && err != io.EOF {
+				// TODO: change to Printf later
+				l.Fatalf("Unexpected error encountered while parsing file: %v", err)
 			}
 			buf = append(buf, b...)
-			// l.Printf("Encountered EOF. Waiting for more data\n")
-			time.Sleep(time.Second * 2)
-			continue
+			stringProcessor(buf)
+			buf = []byte{}
+			startWait = time.Now()
 		}
-		if err != nil && err != io.EOF {
-			return fmt.Errorf("Unexpected error encountered while parsing file: %v", err)
-		}
-		buf = append(buf, b...)
-		// TODO: STRING PROCESSING HERE
-		stringProcessor(buf)
-		buf = []byte{}
-		startWait = time.Now()
 	}
-
-	return nil
 }
 
-func parseStart() error {
+func parseStart(stop <-chan struct{}) {
 	file, err := os.Open(logDir + "/simulation.log")
 	if err != nil {
-		return err
+		l.Fatalf("Failed to read simulation.log file: %v\n", err)
 	}
 	defer file.Close()
 
-	if err = parseLoop(file); err != nil {
-		return err
-	}
-
-	return nil
+	parseLoop(file, stop)
 }
 
 // RunMain performs main application logic
-func RunMain(cmd *cobra.Command, args []string) {
-	testID, _ = cmd.Flags().GetString("testid")
+func RunMain(testID, dir string, stop <-chan struct{}) {
 	nodeName, _ = os.Hostname()
-	l.Printf("Searching for gatling directory at %s", args[0])
-	dir := args[0] + "/gatling"
-	if err := lookupTargetDir(dir); err != nil {
+	l.Printf("Searching for gatling directory at %s", dir)
+	gatlingDir := dir + "/gatling"
+	if err := lookupTargetDir(gatlingDir); err != nil {
 		l.Fatalf("Target directory lookup failed with error: %v\n", err)
 	}
-	if err := lookupResultsDir(dir); err != nil {
+	if err := lookupResultsDir(gatlingDir); err != nil {
 		l.Fatalf("Error happened while searching for results directory: %v\n", err)
 	}
 	if err := waitForLog(); err != nil {
 		l.Fatalf("Failed waiting for simulation.log with error: %v\n", err)
 	}
-	if err := parseStart(); err != nil {
-		l.Fatalf("Failed reading simulation.log: %v\n", err)
-	}
+	parseStart(stop)
 }
