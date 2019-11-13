@@ -37,7 +37,8 @@ import (
 var (
 	l = logger.GetLogger()
 
-	stop = make(chan struct{})
+	stopParser    = make(chan struct{})
+	stopConsumers = make(chan struct{})
 )
 
 func preRunSetup(cmd *cobra.Command, args []string) error {
@@ -65,7 +66,7 @@ func preRunSetup(cmd *cobra.Command, args []string) error {
 	}
 
 	l.Println("Starting application...")
-	return client.SetUpInfluxConnection(cmd, stop)
+	return client.SetUpInfluxConnection(cmd, stopConsumers)
 }
 
 // rootCmd represents the base command when called without any subcommands
@@ -85,7 +86,7 @@ complications of Graphite protocol.`,
 	Args:    cobra.ExactArgs(1),
 	Run: func(cmd *cobra.Command, args []string) {
 		testID, _ := cmd.Flags().GetString("testid")
-		parser.RunMain(testID, args[0], stop)
+		parser.RunMain(testID, args[0], stopParser)
 	},
 }
 

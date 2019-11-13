@@ -42,8 +42,6 @@ var (
 	requestLine = regexp.MustCompile(`^REQUEST\s`)
 	groupLine   = regexp.MustCompile(`GROUP\s`)
 	runLine     = regexp.MustCompile(`^RUN\s`)
-
-	users = make(map[string]int)
 )
 
 func lookupTargetDir(dir string) error {
@@ -127,16 +125,6 @@ func waitForLog() error {
 	return nil
 }
 
-// TODO: Remove
-// print array of byte arrays
-func printByteSlices(bs [][]byte) {
-	ss := make([]string, 0, len(bs))
-	for _, s := range bs {
-		ss = append(ss, fmt.Sprintf(`"%s"`, s))
-	}
-	fmt.Println(ss)
-}
-
 func timeFromUnixBytes(ub []byte) time.Time {
 	timeStamp, _ := strconv.ParseInt(string(ub), 10, 64)
 	return time.Unix(0, timeStamp*1000000)
@@ -145,35 +133,13 @@ func timeFromUnixBytes(ub []byte) time.Time {
 func userLineProcess(lb []byte) {
 	split := bytes.Split(lb, tabSep)
 	scenario := string(split[1])
-	// TODO: Remove
-	// printByteSlices(split)
 
 	switch status := string(split[3]); status {
 	case "START":
-		users[scenario]++
+		c.IncUsersKey(scenario)
 	case "END":
-		users[scenario]--
+		c.DecUsersKey(scenario)
 	}
-
-	// TODO: think of some logic that will send this values every N seconds
-	// instead of every change
-	point, err := infc.NewPoint(
-		"virtualUsers",
-		map[string]string{
-			"scenario": scenario,
-			"testId":   testID,
-		},
-		map[string]interface{}{
-			"currentActive": users[scenario],
-			"nodeName":      nodeName,
-		},
-		timeFromUnixBytes(bytes.TrimSpace(split[5])),
-	)
-	if err != nil {
-		l.Printf("Error creating new point: %v\n", err)
-	}
-	// TODO: Remove
-	_ = point
 }
 
 func requestLineProcess(lb []byte) {
@@ -201,7 +167,7 @@ func requestLineProcess(lb []byte) {
 	if err != nil {
 		l.Printf("Error creating new point: %v\n", err)
 	}
-	c.PointsChannel <- point
+	c.SendPoint(point)
 }
 
 func groupLineProcess(lb []byte) {
@@ -230,15 +196,13 @@ func groupLineProcess(lb []byte) {
 	if err != nil {
 		l.Printf("Error creating new point: %v\n", err)
 	}
-	c.PointsChannel <- point
+	c.SendPoint(point)
 }
 
 func runLineProcess(lb []byte) {
 	split := bytes.Split(lb, tabSep)
-	// simulationName := split[1]
-	// startPoint := timeFromUnixBytes(split[3])
 
-	point, err := infc.NewPoint(
+	point, _ := infc.NewPoint(
 		"testStartEnd",
 		map[string]string{
 			"action":         "start",
@@ -251,15 +215,7 @@ func runLineProcess(lb []byte) {
 		},
 		timeFromUnixBytes(split[3]),
 	)
-	if err != nil {
-		l.Printf("Error creating new point: %v\n", err)
-	}
-	_ = point
-	// TODO: Remove
-	// p, _ := point.Fields()
-	// fmt.Printf("%#v\n", p)
-	// fmt.Printf("%#v\n", point.Tags())
-	// TODO: Send to client for processing
+	c.SendPoint(point)
 }
 
 func stringProcessor(line []byte) error {

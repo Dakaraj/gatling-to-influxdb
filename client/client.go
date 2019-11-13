@@ -11,19 +11,76 @@ import (
 	"github.com/spf13/cobra"
 )
 
+type syncUsers struct {
+	m sync.Mutex
+	u map[string]int
+}
+
+func (s *syncUsers) GetSnapshot() map[string]int {
+	m := make(map[string]int)
+	s.m.Lock()
+	for k, v := range s.u {
+		m[k] = v
+	}
+	s.m.Unlock()
+
+	return m
+}
+
 var (
-	c      infc.Client
-	l      = logger.GetLogger()
-	dbName string
+	c        infc.Client
+	l        = logger.GetLogger()
+	dbName   string
+	testInfo = true
+	info     struct {
+		testID         string
+		simulationName string
+		description    string
+		nodeName       string
+	}
+	lastPoint = time.Now()
 
-	// PointsChannel is a channel to send Request and Group metrics to
-	PointsChannel = make(chan *infc.Point, 100)
+	// users is a thread safe map for storing current snapshot of users
+	// amount generated. TODO: Make this var non-exported
+	users = syncUsers{
+		m: sync.Mutex{},
+		u: make(map[string]int),
+	}
 
-	maxPoints = 5000
+	// pc is a channel to send Request and Group metrics to
+	// TODO: Make this var non-exported
+	pc = make(chan *infc.Point, 100)
+
+	// maybe parameterize later
+	maxPoints        = 5000
+	writeDataTimeout = 10
 )
 
-func sendPoints(points []*infc.Point) {
-	fmt.Println("Writing to DB")
+// SendPoint sends point to the channel listened by metrics consumer
+func SendPoint(p *infc.Point) {
+	pc <- p
+}
+
+// IncUsersKey increments amount of users for given scenario
+func IncUsersKey(scenario string) {
+	users.m.Lock()
+	users.u[scenario]++
+	users.m.Unlock()
+}
+
+// DecUsersKey decrements amount of users for given scenario
+func DecUsersKey(scenario string) {
+	users.m.Lock()
+	defer users.m.Unlock()
+	if users.u[scenario] == 1 {
+		delete(users.u, scenario)
+		return
+	}
+	users.u[scenario]--
+
+}
+
+func sendBatch(points []*infc.Point) {
 	bp, _ := infc.NewBatchPoints(infc.BatchPointsConfig{
 		Precision: "ms", // test how it behaves on exact values
 		Database:  dbName,
@@ -33,31 +90,79 @@ func sendPoints(points []*infc.Point) {
 	if err != nil {
 		l.Fatalf("Error sending points batch to InfluxDB: %v\n", err) // TODO: change from Fatal to Printf (DEBUGGING)
 	}
-	fmt.Println("Write successful")
+	// Debug:
+	l.Printf("Successfully written %d points to DB\n", len(points))
+}
+
+func gatherUsersSnapshots(stop <-chan struct{}, wg *sync.WaitGroup) {
+	defer wg.Done()
+
+	ticker := time.NewTicker(time.Second * 5)
+	defer ticker.Stop()
+	for {
+		select {
+		case t := <-ticker.C:
+			snap := users.GetSnapshot()
+			// fmt.Printf("%#v\n", snap) // TODO: Remove
+			if len(snap) > 0 {
+				for k, v := range snap {
+					p, _ := infc.NewPoint(
+						"users",
+						map[string]string{
+							"scenario": k,
+							"testId":   info.testID,
+						},
+						map[string]interface{}{
+							"active":   v,
+							"nodeName": info.nodeName,
+						},
+						t,
+					)
+					pc <- p
+				}
+			}
+		case <-stop:
+			break
+		}
+	}
 }
 
 func gatherPointMetrics(stop <-chan struct{}, wg *sync.WaitGroup) {
 	defer wg.Done()
-	points := make([]*infc.Point, 0, maxPoints)
-	timer := time.NewTimer(time.Second * 30)
+	var points []*infc.Point
+
+	timer := time.NewTimer(time.Second * time.Duration(writeDataTimeout))
 	for {
 		select {
 		case <-timer.C:
 			if len(points) > 0 {
-				sendPoints(points)
+				sendBatch(points)
 				points = make([]*infc.Point, 0, 5000)
 			}
-			timer.Reset(time.Second * 30)
-		case p := <-PointsChannel:
+			timer.Reset(time.Second * time.Duration(writeDataTimeout))
+		case p := <-pc:
+			// fmt.Println("Got point", p.Name()) // TODO: Remove
+			// this check searches for test start point and extracts test info from it
+			if testInfo {
+				if p.Name() == "testStartEnd" {
+					info.testID = p.Tags()["testId"]
+					info.simulationName = p.Tags()["simulatiomnName"]
+					fields, _ := p.Fields()
+					info.description = fields["description"].(string)
+					info.nodeName = fields["nodeName"].(string)
+				}
+				testInfo = false
+			}
 			points = append(points, p)
 			if len(points) == maxPoints {
-				sendPoints(points)
+				sendBatch(points)
 				points = make([]*infc.Point, 0, 5000)
+				timer.Reset(time.Second * time.Duration(writeDataTimeout))
 			}
+			lastPoint = time.Now()
 		case <-stop:
 			if len(points) > 0 {
-				sendPoints(points)
-				// don't know if it will help to clear some stuff, but whatever
+				sendBatch(points)
 				points = make([]*infc.Point, 0, 5000)
 			}
 			break
@@ -65,24 +170,43 @@ func gatherPointMetrics(stop <-chan struct{}, wg *sync.WaitGroup) {
 	}
 }
 
+func sendClosingPoint() {
+	// Before application stop send a point that signifies a test finishing point
+	p, _ := infc.NewPoint(
+		"testStartEnd",
+		map[string]string{
+			"action":         "finish",
+			"testId":         info.testID,
+			"simulationName": info.simulationName,
+		},
+		map[string]interface{}{
+			"description": info.description,
+			"nodeName":    info.nodeName,
+		},
+		time.Now(),
+	)
+	sendBatch([]*infc.Point{p})
+}
+
 func startProcessing(stop <-chan struct{}) {
 	// TODO: start all consumers
-	// colect cancellation channels for all routines
 	wg := &sync.WaitGroup{}
-	cancelChans := make([]chan struct{}, 3)
 
 	// start requests consumer
-	cancelChans = append(cancelChans, make(chan struct{}))
-	wg.Add(1)
-	go gatherPointMetrics(cancelChans[0], wg)
+	cancelUS := make(chan struct{})
+	cancelGPM := make(chan struct{})
+	wg.Add(2)
+	go gatherUsersSnapshots(cancelUS, wg)
+	go gatherPointMetrics(cancelGPM, wg)
 
 	<-stop
 
-	fmt.Println("Stopping all consumers...")
-	for _, ch := range cancelChans {
-		ch <- struct{}{}
-	}
+	l.Println("Stopping all consumers...")
+	cancelUS <- struct{}{}
+	cancelGPM <- struct{}{} // This should be the last one
+
 	wg.Wait()
+	sendClosingPoint()
 	l.Println("Finishing process")
 }
 
