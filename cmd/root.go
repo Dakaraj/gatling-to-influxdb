@@ -23,6 +23,7 @@ THE SOFTWARE.
 package cmd
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"os/exec"
@@ -37,8 +38,7 @@ import (
 var (
 	l = logger.GetLogger()
 
-	stopParser    = make(chan struct{})
-	stopConsumers = make(chan struct{})
+	cancel context.CancelFunc
 )
 
 func preRunSetup(cmd *cobra.Command, args []string) error {
@@ -66,7 +66,7 @@ func preRunSetup(cmd *cobra.Command, args []string) error {
 	}
 
 	l.Println("Starting application...")
-	return client.SetUpInfluxConnection(cmd, stopConsumers)
+	return client.SetUpInfluxConnection(cmd)
 }
 
 // rootCmd represents the base command when called without any subcommands
@@ -86,7 +86,9 @@ complications of Graphite protocol.`,
 	Args:    cobra.ExactArgs(1),
 	Run: func(cmd *cobra.Command, args []string) {
 		testID, _ := cmd.Flags().GetString("testid")
-		parser.RunMain(testID, args[0], stopParser)
+		var ctx context.Context
+		ctx, cancel = context.WithCancel(context.Background())
+		parser.RunMain(ctx, testID, args[0])
 	},
 }
 

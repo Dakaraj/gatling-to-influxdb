@@ -28,11 +28,10 @@ func (s *syncUsers) GetSnapshot() map[string]int {
 }
 
 var (
-	c        infc.Client
-	l        = logger.GetLogger()
-	dbName   string
-	testInfo = true
-	info     struct {
+	c      infc.Client
+	l      = logger.GetLogger()
+	dbName string
+	info   struct {
 		testID         string
 		simulationName string
 		description    string
@@ -99,6 +98,7 @@ func gatherUsersSnapshots(stop <-chan struct{}, wg *sync.WaitGroup) {
 
 	ticker := time.NewTicker(time.Second * 5)
 	defer ticker.Stop()
+GatherLoop:
 	for {
 		select {
 		case t := <-ticker.C:
@@ -122,7 +122,7 @@ func gatherUsersSnapshots(stop <-chan struct{}, wg *sync.WaitGroup) {
 				}
 			}
 		case <-stop:
-			break
+			break GatherLoop
 		}
 	}
 }
@@ -130,8 +130,10 @@ func gatherUsersSnapshots(stop <-chan struct{}, wg *sync.WaitGroup) {
 func gatherPointMetrics(stop <-chan struct{}, wg *sync.WaitGroup) {
 	defer wg.Done()
 	var points []*infc.Point
+	testInfo := true
 
 	timer := time.NewTimer(time.Second * time.Duration(writeDataTimeout))
+GatherLoop:
 	for {
 		select {
 		case <-timer.C:
@@ -146,7 +148,7 @@ func gatherPointMetrics(stop <-chan struct{}, wg *sync.WaitGroup) {
 			if testInfo {
 				if p.Name() == "testStartEnd" {
 					info.testID = p.Tags()["testId"]
-					info.simulationName = p.Tags()["simulatiomnName"]
+					info.simulationName = p.Tags()["simulationName"]
 					fields, _ := p.Fields()
 					info.description = fields["description"].(string)
 					info.nodeName = fields["nodeName"].(string)
@@ -165,7 +167,7 @@ func gatherPointMetrics(stop <-chan struct{}, wg *sync.WaitGroup) {
 				sendBatch(points)
 				points = make([]*infc.Point, 0, 5000)
 			}
-			break
+			break GatherLoop
 		}
 	}
 }
@@ -183,13 +185,18 @@ func sendClosingPoint() {
 			"description": info.description,
 			"nodeName":    info.nodeName,
 		},
-		time.Now(),
+		// Just to be sure adding +5 secods to the time when last point was received
+		lastPoint.Add(time.Second*5),
 	)
 	sendBatch([]*infc.Point{p})
 }
 
-func startProcessing(stop <-chan struct{}) {
-	// TODO: start all consumers
+// StartProcessing starts consumers that receive points from parser and send to
+// InfluxDB server
+func StartProcessing(stop <-chan struct{}, owg *sync.WaitGroup) {
+	defer owg.Done()
+
+	l.Println("Starting consumers for parser results")
 	wg := &sync.WaitGroup{}
 
 	// start requests consumer
@@ -211,7 +218,7 @@ func startProcessing(stop <-chan struct{}) {
 }
 
 // SetUpInfluxConnection checks if connection with InfluxDB is successful
-func SetUpInfluxConnection(cmd *cobra.Command, stop <-chan struct{}) error {
+func SetUpInfluxConnection(cmd *cobra.Command) error {
 	username, _ := cmd.Flags().GetString("username")
 	password, _ := cmd.Flags().GetString("password")
 	address, _ := cmd.Flags().GetString("address")
@@ -239,9 +246,6 @@ func SetUpInfluxConnection(cmd *cobra.Command, stop <-chan struct{}) error {
 		return fmt.Errorf("Test query failed with error: %v", err)
 	}
 	l.Printf("Connection with InfluxDB at %s successfully established\n", address)
-
-	l.Println("Starting consumers for parser results")
-	go startProcessing(stop)
 
 	return nil
 }

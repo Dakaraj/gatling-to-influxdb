@@ -3,6 +3,7 @@ package parser
 import (
 	"bufio"
 	"bytes"
+	"context"
 	"errors"
 	"fmt"
 	"io"
@@ -10,6 +11,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"strconv"
+	"sync"
 	"time"
 
 	c "github.com/dakaraj/gatling-to-influxdb/client"
@@ -22,7 +24,7 @@ import (
 const (
 	// defines how long will file parser wait for new line before
 	// stopping process (minutes)
-	waitTime = 5
+	waitTime = 1
 )
 
 var (
@@ -42,6 +44,8 @@ var (
 	requestLine = regexp.MustCompile(`^REQUEST\s`)
 	groupLine   = regexp.MustCompile(`GROUP\s`)
 	runLine     = regexp.MustCompile(`^RUN\s`)
+
+	parserStopped = make(chan struct{})
 )
 
 func lookupTargetDir(dir string) error {
@@ -115,7 +119,8 @@ func waitForLog() error {
 		}
 
 		if finfo.Mode().IsRegular() && finfo.Mode().Perm() == 420 {
-			l.Printf("Found simulation.log at %s", logDir)
+			abs, _ := filepath.Abs(logDir + "/simulation.log")
+			l.Printf("Found %s\n", abs)
 			break
 		}
 
@@ -251,7 +256,6 @@ ParseLoop:
 					break ParseLoop
 				}
 				buf = append(buf, b...)
-				// l.Printf("Encountered EOF. Waiting for more data\n")
 				time.Sleep(time.Second * 2)
 				continue
 			}
@@ -265,9 +269,13 @@ ParseLoop:
 			startWait = time.Now()
 		}
 	}
+	parserStopped <- struct{}{}
 }
 
-func parseStart(stop <-chan struct{}) {
+func parseStart(stop <-chan struct{}, wg *sync.WaitGroup) {
+	defer wg.Done()
+
+	l.Println("Starting log file parser...")
 	file, err := os.Open(logDir + "/simulation.log")
 	if err != nil {
 		l.Fatalf("Failed to read simulation.log file: %v\n", err)
@@ -278,7 +286,7 @@ func parseStart(stop <-chan struct{}) {
 }
 
 // RunMain performs main application logic
-func RunMain(testID, dir string, stop <-chan struct{}) {
+func RunMain(ctx context.Context, testID, dir string) {
 	nodeName, _ = os.Hostname()
 	l.Printf("Searching for gatling directory at %s", dir)
 	gatlingDir := dir + "/gatling"
@@ -291,5 +299,21 @@ func RunMain(testID, dir string, stop <-chan struct{}) {
 	if err := waitForLog(); err != nil {
 		l.Fatalf("Failed waiting for simulation.log with error: %v\n", err)
 	}
-	parseStart(stop)
+	wg := &sync.WaitGroup{}
+	stopP := make(chan struct{})
+	stopC := make(chan struct{})
+	wg.Add(2)
+	go parseStart(stopP, wg)
+	go c.StartProcessing(stopC, wg)
+FinisherLoop:
+	for {
+		select {
+		case <-ctx.Done():
+			stopP <- struct{}{}
+		case <-parserStopped:
+			stopC <- struct{}{}
+			break FinisherLoop
+		}
+	}
+	wg.Wait()
 }
