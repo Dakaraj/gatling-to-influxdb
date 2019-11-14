@@ -238,14 +238,14 @@ func stringProcessor(line []byte) error {
 	return nil
 }
 
-func parseLoop(file *os.File, stop <-chan struct{}) {
+func parseLoop(ctx context.Context, file *os.File) {
 	r := bufio.NewReader(file)
 	var buf []byte
 	startWait := time.Now()
 ParseLoop:
 	for {
 		select {
-		case <-stop:
+		case <-ctx.Done():
 			l.Println("Parser received closing signal. Processing stopped")
 			break ParseLoop
 		default:
@@ -260,8 +260,7 @@ ParseLoop:
 				continue
 			}
 			if err != nil && err != io.EOF {
-				// TODO: change to Printf later
-				l.Fatalf("Unexpected error encountered while parsing file: %v", err)
+				l.Printf("Unexpected error encountered while parsing file: %v", err)
 			}
 			buf = append(buf, b...)
 			stringProcessor(buf)
@@ -272,7 +271,7 @@ ParseLoop:
 	parserStopped <- struct{}{}
 }
 
-func parseStart(stop <-chan struct{}, wg *sync.WaitGroup) {
+func parseStart(ctx context.Context, wg *sync.WaitGroup) {
 	defer wg.Done()
 
 	l.Println("Starting log file parser...")
@@ -282,7 +281,7 @@ func parseStart(stop <-chan struct{}, wg *sync.WaitGroup) {
 	}
 	defer file.Close()
 
-	parseLoop(file, stop)
+	parseLoop(ctx, file)
 }
 
 // RunMain performs main application logic
@@ -300,18 +299,18 @@ func RunMain(ctx context.Context, testID, dir string) {
 		l.Fatalf("Failed waiting for simulation.log with error: %v\n", err)
 	}
 	wg := &sync.WaitGroup{}
-	stopP := make(chan struct{})
-	stopC := make(chan struct{})
+	pCtx, pCancel := context.WithCancel(context.Background())
+	cCtx, cCancel := context.WithCancel(context.Background())
 	wg.Add(2)
-	go parseStart(stopP, wg)
-	go c.StartProcessing(stopC, wg)
+	go parseStart(pCtx, wg)
+	go c.StartProcessing(cCtx, wg)
 FinisherLoop:
 	for {
 		select {
 		case <-ctx.Done():
-			stopP <- struct{}{}
+			pCancel()
 		case <-parserStopped:
-			stopC <- struct{}{}
+			cCancel()
 			break FinisherLoop
 		}
 	}

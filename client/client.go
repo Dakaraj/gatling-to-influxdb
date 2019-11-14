@@ -1,6 +1,7 @@
 package client
 
 import (
+	"context"
 	"fmt"
 	"runtime"
 	"sync"
@@ -40,17 +41,16 @@ var (
 	lastPoint = time.Now()
 
 	// users is a thread safe map for storing current snapshot of users
-	// amount generated. TODO: Make this var non-exported
+	// amount generated
 	users = syncUsers{
 		m: sync.Mutex{},
 		u: make(map[string]int),
 	}
 
-	// pc is a channel to send Request and Group metrics to
-	// TODO: Make this var non-exported
+	// pc is a channel to send all point from parser to
 	pc = make(chan *infc.Point, 100)
 
-	// maybe parameterize later
+	// TODO: parameterize later
 	maxPoints        = 5000
 	writeDataTimeout = 10
 )
@@ -87,13 +87,13 @@ func sendBatch(points []*infc.Point) {
 	bp.AddPoints(points)
 	err := c.Write(bp)
 	if err != nil {
-		l.Fatalf("Error sending points batch to InfluxDB: %v\n", err) // TODO: change from Fatal to Printf (DEBUGGING)
+		l.Printf("Error sending points batch to InfluxDB: %v\n", err)
 	}
 	// Debug:
 	l.Printf("Successfully written %d points to DB\n", len(points))
 }
 
-func gatherUsersSnapshots(stop <-chan struct{}, wg *sync.WaitGroup) {
+func gatherUsersSnapshots(ctx context.Context, wg *sync.WaitGroup) {
 	defer wg.Done()
 
 	ticker := time.NewTicker(time.Second * 5)
@@ -103,7 +103,6 @@ GatherLoop:
 		select {
 		case t := <-ticker.C:
 			snap := users.GetSnapshot()
-			// fmt.Printf("%#v\n", snap) // TODO: Remove
 			if len(snap) > 0 {
 				for k, v := range snap {
 					p, _ := infc.NewPoint(
@@ -121,13 +120,13 @@ GatherLoop:
 					pc <- p
 				}
 			}
-		case <-stop:
+		case <-ctx.Done():
 			break GatherLoop
 		}
 	}
 }
 
-func gatherPointMetrics(stop <-chan struct{}, wg *sync.WaitGroup) {
+func gatherPointMetrics(ctx context.Context, wg *sync.WaitGroup) {
 	defer wg.Done()
 	var points []*infc.Point
 	testInfo := true
@@ -143,7 +142,6 @@ GatherLoop:
 			}
 			timer.Reset(time.Second * time.Duration(writeDataTimeout))
 		case p := <-pc:
-			// fmt.Println("Got point", p.Name()) // TODO: Remove
 			// this check searches for test start point and extracts test info from it
 			if testInfo {
 				if p.Name() == "testStartEnd" {
@@ -162,7 +160,7 @@ GatherLoop:
 				timer.Reset(time.Second * time.Duration(writeDataTimeout))
 			}
 			lastPoint = time.Now()
-		case <-stop:
+		case <-ctx.Done():
 			if len(points) > 0 {
 				sendBatch(points)
 				points = make([]*infc.Point, 0, 5000)
@@ -193,24 +191,24 @@ func sendClosingPoint() {
 
 // StartProcessing starts consumers that receive points from parser and send to
 // InfluxDB server
-func StartProcessing(stop <-chan struct{}, owg *sync.WaitGroup) {
+func StartProcessing(ctx context.Context, owg *sync.WaitGroup) {
 	defer owg.Done()
 
 	l.Println("Starting consumers for parser results")
 	wg := &sync.WaitGroup{}
 
 	// start requests consumer
-	cancelUS := make(chan struct{})
-	cancelGPM := make(chan struct{})
+	usCtx, usCancel := context.WithCancel(context.Background())
+	gpmCtx, gpmCancel := context.WithCancel(context.Background())
 	wg.Add(2)
-	go gatherUsersSnapshots(cancelUS, wg)
-	go gatherPointMetrics(cancelGPM, wg)
+	go gatherUsersSnapshots(usCtx, wg)
+	go gatherPointMetrics(gpmCtx, wg)
 
-	<-stop
+	<-ctx.Done()
 
 	l.Println("Stopping all consumers...")
-	cancelUS <- struct{}{}
-	cancelGPM <- struct{}{} // This should be the last one
+	usCancel()
+	gpmCancel() // This should be the last one
 
 	wg.Wait()
 	sendClosingPoint()
