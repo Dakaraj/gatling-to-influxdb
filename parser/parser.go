@@ -1,3 +1,25 @@
+/*
+Copyright © 2019 Anton Kramarev
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in
+all copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
+THE SOFTWARE.
+*/
+
 package parser
 
 import (
@@ -48,9 +70,17 @@ var (
 	parserStopped = make(chan struct{})
 )
 
-func lookupTargetDir(dir string) error {
+func lookupTargetDir(ctx context.Context, dir string) error {
 	for {
-		finfo, err := os.Stat(dir)
+		// This block checks if stop signal is received from user
+		// and stops further lookup
+		select {
+		case <-ctx.Done():
+			return errors.New("Process stopped by user")
+		default:
+		}
+
+		fInfo, err := os.Stat(dir)
 		if err != nil && !os.IsNotExist(err) {
 			return err
 		} else if os.IsNotExist(err) {
@@ -58,7 +88,7 @@ func lookupTargetDir(dir string) error {
 			continue
 		}
 
-		if !finfo.IsDir() {
+		if !fInfo.IsDir() {
 			return fmt.Errorf("Was expecting directory at %s, but found a file", dir)
 		}
 
@@ -92,9 +122,17 @@ func walkFunc(path string, info os.FileInfo, err error) error {
 // then search for all directories, parse their names and compare
 // unix seconds from names with the initial value, and stop when
 // higher value is found, marking it as a target
-func lookupResultsDir(dir string) error {
+func lookupResultsDir(ctx context.Context, dir string) error {
 	l.Println("Searching for results directory...")
 	for {
+		// This block checks if stop signal is received from user
+		// and stops further lookup
+		select {
+		case <-ctx.Done():
+			return errors.New("Process stopped by user")
+		default:
+		}
+
 		err := filepath.Walk(dir, walkFunc)
 		if err == errFound {
 			break
@@ -108,9 +146,17 @@ func lookupResultsDir(dir string) error {
 	return nil
 }
 
-func waitForLog() error {
+func waitForLog(ctx context.Context) error {
 	for {
-		finfo, err := os.Stat(logDir + "/simulation.log")
+		// This block checks if stop signal is received from user
+		// and stops further lookup
+		select {
+		case <-ctx.Done():
+			return errors.New("Process stopped by user")
+		default:
+		}
+
+		fInfo, err := os.Stat(logDir + "/simulation.log")
 		if err != nil && !os.IsNotExist(err) {
 			return err
 		} else if os.IsNotExist(err) {
@@ -118,7 +164,8 @@ func waitForLog() error {
 			continue
 		}
 
-		if finfo.Mode().IsRegular() && finfo.Mode().Perm() == 420 {
+		// WARNING: second part of this check may fail on Windows. Not tested
+		if fInfo.Mode().IsRegular() && fInfo.Mode().Perm() == 420 {
 			abs, _ := filepath.Abs(logDir + "/simulation.log")
 			l.Printf("Found %s\n", abs)
 			break
@@ -289,13 +336,13 @@ func RunMain(ctx context.Context, testID, dir string) {
 	nodeName, _ = os.Hostname()
 	l.Printf("Searching for gatling directory at %s", dir)
 	gatlingDir := dir + "/gatling"
-	if err := lookupTargetDir(gatlingDir); err != nil {
+	if err := lookupTargetDir(ctx, gatlingDir); err != nil {
 		l.Fatalf("Target directory lookup failed with error: %v\n", err)
 	}
-	if err := lookupResultsDir(gatlingDir); err != nil {
+	if err := lookupResultsDir(ctx, gatlingDir); err != nil {
 		l.Fatalf("Error happened while searching for results directory: %v\n", err)
 	}
-	if err := waitForLog(); err != nil {
+	if err := waitForLog(ctx); err != nil {
 		l.Fatalf("Failed waiting for simulation.log with error: %v\n", err)
 	}
 	wg := &sync.WaitGroup{}

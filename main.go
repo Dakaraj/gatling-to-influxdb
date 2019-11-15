@@ -24,6 +24,5 @@ package main
 import "github.com/dakaraj/gatling-to-influxdb/cmd"
 
 func main() {
-	// TODO: Add catcher of system sygnals
 	cmd.Execute()
 }

@@ -27,7 +27,8 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
-	"strings"
+	"os/signal"
+	"syscall"
 
 	"github.com/dakaraj/gatling-to-influxdb/client"
 	"github.com/dakaraj/gatling-to-influxdb/logger"
@@ -38,32 +39,48 @@ import (
 var (
 	l = logger.GetLogger()
 
+	ctx    context.Context
 	cancel context.CancelFunc
 )
 
 func preRunSetup(cmd *cobra.Command, args []string) error {
-	// Wrorkaround for a mandatory testid (t) flag
+	// Workaround for a mandatory testid (t) flag
 	if t, _ := cmd.Flags().GetString("testid"); t == "" {
-		l.Fatalln("Test identificator is not provided. Please provide some value with --testid (-t) flag")
+		l.Fatalln("Test identifier is not provided. Please provide some value with --testid (-t) flag")
 	}
 	// End of workaround
 
+	// set up context
+	ctx, cancel = context.WithCancel(context.Background())
+
+	// If detached state is requested - filter out -d flag and start
+	// new process returning its PID. Then close this process
 	if d, _ := cmd.Flags().GetBool("detach"); d {
-		newArgs := make([]string, 0, len(os.Args))
-		for i, a := range os.Args {
-			if strings.HasPrefix(a, "-d") || i == 0 {
+		newArgs := make([]string, 0, len(os.Args)-2)
+		for _, a := range os.Args[1:] {
+			if a == "-d" || a == "--detached" {
 				continue
 			}
 			newArgs = append(newArgs, a)
 		}
+
 		command := exec.Command(os.Args[0], newArgs...)
-		if err := command.Run(); err != nil {
+		if err := command.Start(); err != nil {
 			return err
 		}
 		pid := command.Process.Pid
-		fmt.Println("Started background process with [PID]:", pid)
+		fmt.Printf("[PID]\t %d\n", pid)
 		os.Exit(0)
 	}
+
+	// catcher of SIGKILL SIGTERM signals
+	go func() {
+		c := make(chan os.Signal, 1)
+		signal.Notify(c, syscall.SIGINT, syscall.SIGTERM)
+		sig := <-c
+		l.Printf("Received signal %v. Stopping application...", sig)
+		cancel()
+	}()
 
 	l.Println("Starting application...")
 	return client.SetUpInfluxConnection(cmd)
@@ -72,9 +89,9 @@ func preRunSetup(cmd *cobra.Command, args []string) error {
 // rootCmd represents the base command when called without any subcommands
 var rootCmd = &cobra.Command{
 	Use: "g2i target/directory/path",
-	Example: `g2i ./target
+	Example: `g2i ./target -t "some-test-id"
 
-Will first wait for directory to appear if not exists yet.
+Will first check InfluxDB connection.
 Then will search for the latest results directory or wait for it to appear.
 Next will search for simulation.log file to appear and start processing it.`,
 	Short: "Write Gatling logs directly to InfluxDB",
@@ -86,8 +103,6 @@ complications of Graphite protocol.`,
 	Args:    cobra.ExactArgs(1),
 	Run: func(cmd *cobra.Command, args []string) {
 		testID, _ := cmd.Flags().GetString("testid")
-		var ctx context.Context
-		ctx, cancel = context.WithCancel(context.Background())
 		parser.RunMain(ctx, testID, args[0])
 	},
 }
@@ -101,12 +116,12 @@ func Execute() {
 }
 
 func init() {
-	rootCmd.Flags().BoolP("detach", "d", false, "Run application in background. Returns [PID] on start")
+	rootCmd.Flags().BoolP("detached", "d", false, "Run application in background. Returns [PID] on start")
 	rootCmd.Flags().StringP("address", "a", "http://localhost:8086", "HTTP address and port of InfluxDB instance")
 	rootCmd.Flags().StringP("username", "u", "", "Username credential for InfluxDB instance")
 	rootCmd.Flags().StringP("password", "p", "", "Password credential for InfluxDB instance")
 	rootCmd.Flags().StringP("database", "b", "gatling", "Name of the database in InfluxDB")
-	rootCmd.Flags().StringP("testid", "t", "", "Unique test identificator (REQUIRED)")
+	rootCmd.Flags().StringP("testid", "t", "", "Unique test identifier (REQUIRED)")
 	// Seems like an issue: https://github.com/spf13/cobra/issues/655
 	// This mark does not work but let it stay here
 	rootCmd.MarkFlagRequired("testid")

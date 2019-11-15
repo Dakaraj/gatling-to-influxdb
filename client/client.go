@@ -1,3 +1,25 @@
+/*
+Copyright © 2019 Anton Kramarev
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in
+all copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
+THE SOFTWARE.
+*/
+
 package client
 
 import (
@@ -17,6 +39,13 @@ type syncUsers struct {
 	u map[string]int
 }
 
+type testInfo struct {
+	testID         string
+	simulationName string
+	description    string
+	nodeName       string
+}
+
 func (s *syncUsers) GetSnapshot() map[string]int {
 	m := make(map[string]int)
 	s.m.Lock()
@@ -29,15 +58,10 @@ func (s *syncUsers) GetSnapshot() map[string]int {
 }
 
 var (
-	c      infc.Client
-	l      = logger.GetLogger()
-	dbName string
-	info   struct {
-		testID         string
-		simulationName string
-		description    string
-		nodeName       string
-	}
+	c         infc.Client
+	l         = logger.GetLogger()
+	dbName    string
+	info      testInfo
 	lastPoint = time.Now()
 
 	// users is a thread safe map for storing current snapshot of users
@@ -129,7 +153,7 @@ GatherLoop:
 func gatherPointMetrics(ctx context.Context, wg *sync.WaitGroup) {
 	defer wg.Done()
 	var points []*infc.Point
-	testInfo := true
+	infoRequired := true
 
 	timer := time.NewTimer(time.Second * time.Duration(writeDataTimeout))
 GatherLoop:
@@ -137,21 +161,24 @@ GatherLoop:
 		select {
 		case <-timer.C:
 			if len(points) > 0 {
+				// TODO: Maybe add some retry mechanic later
 				sendBatch(points)
 				points = make([]*infc.Point, 0, 5000)
 			}
 			timer.Reset(time.Second * time.Duration(writeDataTimeout))
 		case p := <-pc:
 			// this check searches for test start point and extracts test info from it
-			if testInfo {
+			if infoRequired {
 				if p.Name() == "testStartEnd" {
-					info.testID = p.Tags()["testId"]
-					info.simulationName = p.Tags()["simulationName"]
 					fields, _ := p.Fields()
-					info.description = fields["description"].(string)
-					info.nodeName = fields["nodeName"].(string)
+					info = testInfo{
+						testID:         p.Tags()["testId"],
+						simulationName: p.Tags()["simulationName"],
+						description:    fields["description"].(string),
+						nodeName:       fields["nodeName"].(string),
+					}
 				}
-				testInfo = false
+				infoRequired = false
 			}
 			points = append(points, p)
 			if len(points) == maxPoints {
@@ -171,6 +198,12 @@ GatherLoop:
 }
 
 func sendClosingPoint() {
+	// If info struct is empty, then parsing of file did not start,
+	// so there is no need to send closing point
+	if info.testID == "" {
+		return
+	}
+
 	// Before application stop send a point that signifies a test finishing point
 	p, _ := infc.NewPoint(
 		"testStartEnd",
