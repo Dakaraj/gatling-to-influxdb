@@ -55,7 +55,7 @@ func preRunSetup(cmd *cobra.Command, args []string) error {
 
 	// If detached state is requested - filter out -d flag and start
 	// new process returning its PID. Then close this process
-	if d, _ := cmd.Flags().GetBool("detach"); d {
+	if d, _ := cmd.Flags().GetBool("detached"); d {
 		newArgs := make([]string, 0, len(os.Args)-2)
 		for _, a := range os.Args[1:] {
 			if a == "-d" || a == "--detached" {
@@ -98,7 +98,7 @@ Next will search for simulation.log file to appear and start processing it.`,
 	Long: `This application allows writing raw Gatling load testing
 tool logs directly to InfluxDB avoiding unnecessary
 complications of Graphite protocol.`,
-	Version: "v0.0.1",
+	Version: "v0.0.2",
 	PreRunE: preRunSetup,
 	Args:    cobra.ExactArgs(1),
 	Run: func(cmd *cobra.Command, args []string) {

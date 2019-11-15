@@ -332,8 +332,9 @@ func parseStart(ctx context.Context, wg *sync.WaitGroup) {
 }
 
 // RunMain performs main application logic
-func RunMain(ctx context.Context, testID, dir string) {
+func RunMain(ctx context.Context, tID, dir string) {
 	nodeName, _ = os.Hostname()
+	testID = tID
 	l.Printf("Searching for gatling directory at %s", dir)
 	gatlingDir := dir + "/gatling"
 	if err := lookupTargetDir(ctx, gatlingDir); err != nil {
