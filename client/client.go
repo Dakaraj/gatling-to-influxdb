@@ -201,6 +201,7 @@ func sendClosingPoint() {
 	// If info struct is empty, then parsing of file did not start,
 	// so there is no need to send closing point
 	if info.testID == "" {
+		l.Println("Skipping stop test point write...")
 		return
 	}
 
