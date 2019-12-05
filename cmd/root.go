@@ -69,7 +69,7 @@ func preRunSetup(cmd *cobra.Command, args []string) error {
 			return err
 		}
 		pid := command.Process.Pid
-		fmt.Printf("[PID]\t %d\n", pid)
+		fmt.Printf("[PID]\t%d\n", pid)
 		os.Exit(0)
 	}
 
@@ -88,8 +88,8 @@ func preRunSetup(cmd *cobra.Command, args []string) error {
 
 // rootCmd represents the base command when called without any subcommands
 var rootCmd = &cobra.Command{
-	Use: "g2i target/directory/path",
-	Example: `g2i ./target -t "some-test-id"
+	Use: "g2i path/to/target/gatling",
+	Example: `g2i ./target/gatling -t "some-test-id"
 
 Will first check InfluxDB connection.
 Then will search for the latest results directory or wait for it to appear.
@@ -98,12 +98,11 @@ Next will search for simulation.log file to appear and start processing it.`,
 	Long: `This application allows writing raw Gatling load testing
 tool logs directly to InfluxDB avoiding unnecessary
 complications of Graphite protocol.`,
-	Version: "v0.0.2",
+	Version: "v0.0.3",
 	PreRunE: preRunSetup,
 	Args:    cobra.ExactArgs(1),
 	Run: func(cmd *cobra.Command, args []string) {
-		testID, _ := cmd.Flags().GetString("testid")
-		parser.RunMain(ctx, testID, args[0])
+		parser.RunMain(ctx, cmd, args[0])
 	},
 }
 
@@ -122,6 +121,7 @@ func init() {
 	rootCmd.Flags().StringP("password", "p", "", "Password credential for InfluxDB instance")
 	rootCmd.Flags().StringP("database", "b", "gatling", "Name of the database in InfluxDB")
 	rootCmd.Flags().StringP("testid", "t", "", "Unique test identifier (REQUIRED)")
+	rootCmd.Flags().UintP("stoptimeout", "s", 60, "Time (seconds) to exit if no new log lines found")
 	// Seems like an issue: https://github.com/spf13/cobra/issues/655
 	// This mark does not work but let it stay here
 	rootCmd.MarkFlagRequired("testid")

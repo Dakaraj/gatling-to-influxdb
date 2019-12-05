@@ -16,13 +16,15 @@ If database uses authentication credentials can be provided using `--username` a
 
 Application can be used for parsing an existing log file, but users info will be corrupted, so use at your own risk. Right behavior for this case swill be implemented later (probably).
 
+No unit tests are written for application as of right now, indicating it's absolutely not production ready and battle tested. But you can try it anyway :)
+
 ## Building application
 
-For building go version 1.11 or older is required with enabled modules support `GO111MODULE=on`.
+For building go version 1.11 or older is required (though it was built with version 1.13) with enabled modules support `GO111MODULE=on`. GOBIN variable should be in path to run application after installing from anywhere.
 
 ```bash
 git clone git@github.com:Dakaraj/gatling-to-influxdb.git
 cd gatling-to-influxdb
 go mod download
-go build -i -o $GOBIN/g2i
+go install g2i.go
 ```

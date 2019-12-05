@@ -57,6 +57,10 @@ func (s *syncUsers) GetSnapshot() map[string]int {
 	return m
 }
 
+const (
+	userMetricsTicker = 1
+)
+
 var (
 	c         infc.Client
 	l         = logger.GetLogger()
@@ -105,22 +109,23 @@ func DecUsersKey(scenario string) {
 
 func sendBatch(points []*infc.Point) {
 	bp, _ := infc.NewBatchPoints(infc.BatchPointsConfig{
-		Precision: "ms", // test how it behaves on exact values
+		Precision: "us", // test how it behaves on exact values
 		Database:  dbName,
 	})
 	bp.AddPoints(points)
 	err := c.Write(bp)
 	if err != nil {
 		l.Printf("Error sending points batch to InfluxDB: %v\n", err)
+	} else {
+		// Debug:
+		l.Printf("Successfully written %d points to DB\n", len(points))
 	}
-	// Debug:
-	l.Printf("Successfully written %d points to DB\n", len(points))
 }
 
 func gatherUsersSnapshots(ctx context.Context, wg *sync.WaitGroup) {
 	defer wg.Done()
 
-	ticker := time.NewTicker(time.Second * 5)
+	ticker := time.NewTicker(time.Second * userMetricsTicker)
 	defer ticker.Stop()
 GatherLoop:
 	for {
@@ -270,7 +275,7 @@ func SetUpInfluxConnection(cmd *cobra.Command) error {
 	if err != nil {
 		return fmt.Errorf("Connection with InfluxDB at %s could not be established. Error: %v", address, err)
 	}
-	res, err := c.Query(infc.NewQuery("SHOW MEASUREMENTS", dbName, "ms"))
+	res, err := c.Query(infc.NewQuery("SHOW MEASUREMENTS", dbName, "us"))
 	if err != nil {
 		return fmt.Errorf("Connection with InfluxDB at %s could not be established. Error: %v", address, err)
 	}
