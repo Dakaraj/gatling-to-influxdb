@@ -29,6 +29,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math/rand"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -37,16 +38,11 @@ import (
 	"time"
 
 	c "github.com/dakaraj/gatling-to-influxdb/client"
+	"github.com/spf13/cobra"
 
 	infc "github.com/influxdata/influxdb1-client/v2"
 
 	"github.com/dakaraj/gatling-to-influxdb/logger"
-)
-
-const (
-	// defines how long will file parser wait for new line before
-	// stopping process (minutes)
-	waitTime = 1
 )
 
 var (
@@ -58,6 +54,7 @@ var (
 	errFound = errors.New("Found")
 	logDir   string
 	testID   string
+	waitTime uint
 
 	tabSep = []byte{9}
 
@@ -66,11 +63,12 @@ var (
 	requestLine = regexp.MustCompile(`^REQUEST\s`)
 	groupLine   = regexp.MustCompile(`GROUP\s`)
 	runLine     = regexp.MustCompile(`^RUN\s`)
+	errorLine   = regexp.MustCompile(`^ERROR\s`)
 
 	parserStopped = make(chan struct{})
 )
 
-func lookupTargetDir(ctx context.Context, dir string) error {
+func lookupGatlingDir(ctx context.Context, dir string) error {
 	for {
 		// This block checks if stop signal is received from user
 		// and stops further lookup
@@ -179,7 +177,9 @@ func waitForLog(ctx context.Context) error {
 
 func timeFromUnixBytes(ub []byte) time.Time {
 	timeStamp, _ := strconv.ParseInt(string(ub), 10, 64)
-	return time.Unix(0, timeStamp*1000000)
+	// A workaround that adds random amount of microseconds to the timestamp
+	// so db entries will (should) not be overwritten
+	return time.Unix(0, timeStamp*1000000+rand.Int63n(1000)*1000)
 }
 
 func userLineProcess(lb []byte) {
@@ -224,7 +224,6 @@ func requestLineProcess(lb []byte) {
 
 func groupLineProcess(lb []byte) {
 	split := bytes.Split(lb, tabSep)
-	// printByteSlices(split)
 
 	userID, _ := strconv.ParseInt(string(split[1]), 10, 32)
 	start, _ := strconv.ParseInt(string(split[3]), 10, 64)
@@ -270,7 +269,24 @@ func runLineProcess(lb []byte) {
 	c.SendPoint(point)
 }
 
-func stringProcessor(line []byte) error {
+func errorLineProcess(lb []byte) {
+	split := bytes.Split(lb, tabSep)
+
+	point, _ := infc.NewPoint(
+		"errors",
+		map[string]string{
+			"testId": testID,
+		},
+		map[string]interface{}{
+			"errorMessage": string(split[1]),
+			"nodeName":     nodeName,
+		},
+		timeFromUnixBytes(bytes.TrimSpace(split[2])),
+	)
+	c.SendPoint(point)
+}
+
+func stringProcessor(line []byte) {
 	switch {
 	case requestLine.Match(line):
 		requestLineProcess(line)
@@ -280,9 +296,11 @@ func stringProcessor(line []byte) error {
 		groupLineProcess(line)
 	case runLine.Match(line):
 		runLineProcess(line)
+	case errorLine.Match(line):
+		errorLineProcess(line)
+	default:
+		l.Printf("Unknown line type encountered: %s", line)
 	}
-
-	return nil
 }
 
 func parseLoop(ctx context.Context, file *os.File) {
@@ -298,8 +316,8 @@ ParseLoop:
 		default:
 			b, err := r.ReadBytes('\n')
 			if err == io.EOF {
-				if time.Now().After(startWait.Add(time.Duration(waitTime) * time.Minute)) {
-					l.Printf("No new lines found for %d minutes. Stopping application...", waitTime)
+				if time.Now().After(startWait.Add(time.Duration(waitTime) * time.Second)) {
+					l.Printf("No new lines found for %d seconds. Stopping application...", waitTime)
 					break ParseLoop
 				}
 				buf = append(buf, b...)
@@ -332,15 +350,16 @@ func parseStart(ctx context.Context, wg *sync.WaitGroup) {
 }
 
 // RunMain performs main application logic
-func RunMain(ctx context.Context, tID, dir string) {
+func RunMain(ctx context.Context, cmd *cobra.Command, dir string) {
+	testID, _ = cmd.Flags().GetString("testid")
+	waitTime, _ = cmd.Flags().GetUint("stoptimeout")
+	rand.Seed(time.Now().UnixNano())
 	nodeName, _ = os.Hostname()
-	testID = tID
-	l.Printf("Searching for gatling directory at %s", dir)
-	gatlingDir := dir + "/gatling"
-	if err := lookupTargetDir(ctx, gatlingDir); err != nil {
+	l.Printf("Searching for directory at %s", dir)
+	if err := lookupGatlingDir(ctx, dir); err != nil {
 		l.Fatalf("Target directory lookup failed with error: %v\n", err)
 	}
-	if err := lookupResultsDir(ctx, gatlingDir); err != nil {
+	if err := lookupResultsDir(ctx, dir); err != nil {
 		l.Fatalf("Error happened while searching for results directory: %v\n", err)
 	}
 	if err := waitForLog(ctx); err != nil {
@@ -352,6 +371,7 @@ func RunMain(ctx context.Context, tID, dir string) {
 	wg.Add(2)
 	go parseStart(pCtx, wg)
 	go c.StartProcessing(cCtx, wg)
+
 FinisherLoop:
 	for {
 		select {
