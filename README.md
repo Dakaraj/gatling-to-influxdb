@@ -12,6 +12,22 @@ Default database name is `gatling`, it can be changed using `--database` (`-d`) 
 
 If database uses authentication credentials can be provided using `--username` and `--password` (`-u`, `-p` respectfully) keys.
 
+Integrating to CI can be done by running a set of commands like this (example uses SBT):
+
+```bash
+echo "Cleaning old stuff" && \
+sbt clean && \
+echo "Starting g2i in detached mode, saving PID in variable" && \
+G2IPID=$(g2i ./target/gatling -a http://localhost:8086 -u root -p root -b gatling -t "MyUniqueTestId" -d | awk '{print $2}') && \
+echo "Compile and launch simulation" && \
+sbt compile "gatling:testOnly simulations.MyCoolSimulation"; \
+echo "Sending interrupt signal to g2i process" && \
+kill -INT $G2IPID && \
+echo "Waiting for process to stop..." && \
+sleep 10 && \
+echo "Exiting"
+```
+
 ## Warning
 
 Application can be used for parsing an existing log file, but users info will be corrupted, so use at your own risk. Right behavior for this case swill be implemented later (probably).
