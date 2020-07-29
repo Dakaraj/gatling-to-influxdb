@@ -8,7 +8,7 @@ To get help on application usage use `--help` (`-h`) key. It will provide all ex
 
 By default `g2i` looks for InfluxDB at `http://localhost:8086` but it can be easily changed using `-a` key with another HTTP address.
 
-Default database name is `gatling`, it can be changed using `--database` (`-d`) key following another name.
+Default database name is `gatling`, it can be changed using `--database` (`-b`) key following another name.
 
 If database uses authentication credentials can be provided using `--username` and `--password` (`-u`, `-p` respectfully) keys.
 

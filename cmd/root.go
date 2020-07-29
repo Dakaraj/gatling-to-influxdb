@@ -25,36 +25,44 @@ package cmd
 import (
 	"context"
 	"fmt"
+	"log"
 	"os"
 	"os/exec"
 	"os/signal"
 	"syscall"
 
-	"github.com/dakaraj/gatling-to-influxdb/client"
+	"github.com/dakaraj/gatling-to-influxdb/influx"
 	"github.com/dakaraj/gatling-to-influxdb/logger"
 	"github.com/dakaraj/gatling-to-influxdb/parser"
 	"github.com/spf13/cobra"
 )
 
 var (
-	l = logger.GetLogger()
-
+	l      *log.Logger
 	ctx    context.Context
 	cancel context.CancelFunc
 )
 
 func preRunSetup(cmd *cobra.Command, args []string) error {
+	logPath, _ := cmd.Flags().GetString("log-file-path")
+	err := logger.InitLogger(logPath)
+	if err != nil {
+		return fmt.Errorf("Failed to init application logger: %w", err)
+	}
+
 	// Workaround for a mandatory testid (t) flag
-	if t, _ := cmd.Flags().GetString("testid"); t == "" {
-		l.Fatalln("Test identifier is not provided. Please provide some value with --testid (-t) flag")
+	if t, _ := cmd.Flags().GetString("test-id"); t == "" {
+		fmt.Print("Test identifier is not provided. Please provide some value with --testid (-t) flag\n\n")
+		cmd.Help()
+		os.Exit(1)
 	}
 	// End of workaround
 
-	// set up context
+	// set up global context
 	ctx, cancel = context.WithCancel(context.Background())
 
-	// If detached state is requested - filter out -d flag and start
-	// new process returning its PID. Then close this process
+	// If detached state is requested, filter out corresponding flags and start new process
+	// returning with same arguments printing its PID. Then close the initial process
 	if d, _ := cmd.Flags().GetBool("detached"); d {
 		newArgs := make([]string, 0, len(os.Args)-2)
 		for _, a := range os.Args[1:] {
@@ -66,7 +74,7 @@ func preRunSetup(cmd *cobra.Command, args []string) error {
 
 		command := exec.Command(os.Args[0], newArgs...)
 		if err := command.Start(); err != nil {
-			return err
+			return fmt.Errorf("Failed to start a detached process: %w", err)
 		}
 		pid := command.Process.Pid
 		fmt.Printf("[PID]\t%d\n", pid)
@@ -78,17 +86,17 @@ func preRunSetup(cmd *cobra.Command, args []string) error {
 		c := make(chan os.Signal, 1)
 		signal.Notify(c, syscall.SIGINT, syscall.SIGTERM)
 		sig := <-c
-		l.Printf("Received signal %v. Stopping application...", sig)
+		l.Printf("Received signal %v. Stopping application...\n", sig)
 		cancel()
 	}()
 
 	l.Println("Starting application...")
-	return client.SetUpInfluxConnection(cmd)
+	return influx.InitInfluxConnection(cmd)
 }
 
 // rootCmd represents the base command when called without any subcommands
 var rootCmd = &cobra.Command{
-	Use: "g2i path/to/target/gatling",
+	Use: "g2i [path/to/results/dir]",
 	Example: `g2i ./target/gatling -t "some-test-id"
 
 Will first check InfluxDB connection.
@@ -102,26 +110,30 @@ complications of Graphite protocol.`,
 	PreRunE: preRunSetup,
 	Args:    cobra.ExactArgs(1),
 	Run: func(cmd *cobra.Command, args []string) {
-		parser.RunMain(ctx, cmd, args[0])
+		parser.RunMain(cmd, args[0])
 	},
 }
 
 // Execute adds all child commands to the root command and sets flags appropriately.
 // This is called by main.main(). It only needs to happen once to the rootCmd.
 func Execute() {
-	if err := rootCmd.Execute(); err != nil {
+	if err := rootCmd.ExecuteContext(ctx); err != nil {
 		l.Fatalln(err)
 	}
 }
 
 func init() {
+	rootCmd.Flags().BoolP("help", "h", false, "Display this help for g2i application")
+	rootCmd.Flags().BoolP("version", "v", false, "Display current g2i application version")
 	rootCmd.Flags().BoolP("detached", "d", false, "Run application in background. Returns [PID] on start")
 	rootCmd.Flags().StringP("address", "a", "http://localhost:8086", "HTTP address and port of InfluxDB instance")
 	rootCmd.Flags().StringP("username", "u", "", "Username credential for InfluxDB instance")
 	rootCmd.Flags().StringP("password", "p", "", "Password credential for InfluxDB instance")
-	rootCmd.Flags().StringP("database", "b", "gatling", "Name of the database in InfluxDB")
-	rootCmd.Flags().StringP("testid", "t", "", "Unique test identifier (REQUIRED)")
-	rootCmd.Flags().UintP("stoptimeout", "s", 60, "Time (seconds) to exit if no new log lines found")
+	rootCmd.Flags().StringP("database", "b", "gatling", "Database name in InfluxDB")
+	rootCmd.Flags().StringP("log-file-path", "l", "./log/g2i.log", "File path to application log file")
+	rootCmd.Flags().StringP("test-id", "t", "", "Unique test identifier (REQUIRED)")
+	rootCmd.Flags().UintP("stop-timeout", "s", 60, "Time (seconds) to exit if no new log lines found")
+	rootCmd.Flags().UintP("max-batch-size", "m", 5000, "Max points batch size to sent to InfluxDB")
 	// Seems like an issue: https://github.com/spf13/cobra/issues/655
 	// This mark does not work but let it stay here
 	rootCmd.MarkFlagRequired("testid")

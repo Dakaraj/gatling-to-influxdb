@@ -20,7 +20,7 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
 THE SOFTWARE.
 */
 
-package client
+package influx
 
 import (
 	"context"
@@ -30,6 +30,7 @@ import (
 	"time"
 
 	"github.com/dakaraj/gatling-to-influxdb/logger"
+	_ "github.com/influxdata/influxdb1-client" // workaround from client documentation
 	infc "github.com/influxdata/influxdb1-client/v2"
 	"github.com/spf13/cobra"
 )
@@ -79,8 +80,8 @@ var (
 	pc = make(chan *infc.Point, 100)
 
 	// TODO: parameterize later
-	maxPoints        = 5000
-	writeDataTimeout = 10
+	maxPoints        uint = 5000
+	writeDataTimeout      = 10
 )
 
 // SendPoint sends point to the channel listened by metrics consumer
@@ -186,9 +187,9 @@ GatherLoop:
 				infoRequired = false
 			}
 			points = append(points, p)
-			if len(points) == maxPoints {
+			if len(points) == int(maxPoints) {
 				sendBatch(points)
-				points = make([]*infc.Point, 0, 5000)
+				points = make([]*infc.Point, 0, maxPoints)
 				timer.Reset(time.Second * time.Duration(writeDataTimeout))
 			}
 			lastPoint = time.Now()
@@ -254,12 +255,14 @@ func StartProcessing(ctx context.Context, owg *sync.WaitGroup) {
 	l.Println("Finishing process")
 }
 
-// SetUpInfluxConnection checks if connection with InfluxDB is successful
-func SetUpInfluxConnection(cmd *cobra.Command) error {
+// InitInfluxConnection checks if connection with InfluxDB is successful
+func InitInfluxConnection(cmd *cobra.Command) error {
 	username, _ := cmd.Flags().GetString("username")
 	password, _ := cmd.Flags().GetString("password")
 	address, _ := cmd.Flags().GetString("address")
 	dbName, _ = cmd.Flags().GetString("database")
+	maxPoints, _ = cmd.Flags().GetUint("max-batch-size")
+
 	var err error
 	c, err = infc.NewHTTPClient(infc.HTTPConfig{
 		Addr:      address,
@@ -271,11 +274,12 @@ func SetUpInfluxConnection(cmd *cobra.Command) error {
 	if err != nil {
 		return err
 	}
+
 	_, _, err = c.Ping(time.Second * 10)
 	if err != nil {
 		return fmt.Errorf("Connection with InfluxDB at %s could not be established. Error: %v", address, err)
 	}
-	res, err := c.Query(infc.NewQuery("SHOW MEASUREMENTS", dbName, "us"))
+	res, err := c.Query(infc.NewQuery("SHOW MEASUREMENTS", dbName, "ns"))
 	if err != nil {
 		return fmt.Errorf("Connection with InfluxDB at %s could not be established. Error: %v", address, err)
 	}

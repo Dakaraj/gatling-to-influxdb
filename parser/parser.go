@@ -37,24 +37,23 @@ import (
 	"sync"
 	"time"
 
-	c "github.com/dakaraj/gatling-to-influxdb/client"
-	"github.com/spf13/cobra"
-
-	infc "github.com/influxdata/influxdb1-client/v2"
-
+	"github.com/dakaraj/gatling-to-influxdb/influx"
 	"github.com/dakaraj/gatling-to-influxdb/logger"
+	infc "github.com/influxdata/influxdb1-client/v2"
+	"github.com/spf13/cobra"
 )
 
 var (
-	l        = logger.GetLogger()
-	re       = regexp.MustCompile(`^.+?-(\d{14})\d{3}$`)
-	start    = time.Now().Unix()
-	nodeName string
+	l                    = logger.GetLogger()
+	resultDirNamePattern = regexp.MustCompile(`^.+?-(\d{14})\d{3}$`)
+	start                = time.Now().Unix()
+	nodeName             string
 
-	errFound = errors.New("Found")
-	logDir   string
-	testID   string
-	waitTime uint
+	errFound         = errors.New("Found")
+	errStoppedByUser = errors.New("Process stopped by user")
+	logDir           string
+	testID           string
+	waitTime         uint
 
 	tabSep = []byte{9}
 
@@ -68,20 +67,21 @@ var (
 	parserStopped = make(chan struct{})
 )
 
-func lookupGatlingDir(ctx context.Context, dir string) error {
+func lookupTargetDir(ctx context.Context, dir string) error {
 	for {
 		// This block checks if stop signal is received from user
 		// and stops further lookup
 		select {
 		case <-ctx.Done():
-			return errors.New("Process stopped by user")
+			return errStoppedByUser
 		default:
 		}
 
 		fInfo, err := os.Stat(dir)
 		if err != nil && !os.IsNotExist(err) {
-			return err
-		} else if os.IsNotExist(err) {
+			return fmt.Errorf("Target path %s exists but there is an error: %w", dir, err)
+		}
+		if os.IsNotExist(err) {
 			time.Sleep(time.Second * 5)
 			continue
 		}
@@ -99,27 +99,28 @@ func lookupGatlingDir(ctx context.Context, dir string) error {
 }
 
 func walkFunc(path string, info os.FileInfo, err error) error {
-	if info.IsDir() && re.MatchString(path) {
-		dateString := re.FindStringSubmatch(path)[1]
+	if info.IsDir() && resultDirNamePattern.MatchString(path) {
+		dateString := resultDirNamePattern.FindStringSubmatch(path)[1]
 		t, _ := time.Parse("20060102150405", dateString)
 		if t.Unix() > start {
-			logDir = path
-			abs, _ := filepath.Abs(logDir)
-			l.Printf("Found log directory at %s", abs)
+			logDir, _ := filepath.Abs(logDir)
+			l.Printf("Found log directory at %s", logDir)
+
 			return errFound
 		}
 	}
-	if info.IsDir() && !re.MatchString(path) && info.Name() != "gatling" {
+	if info.IsDir() && !resultDirNamePattern.MatchString(path) {
 		return filepath.SkipDir
 	}
 
 	return nil
 }
 
-// logic is the following: at the start of the script we log a time
-// then search for all directories, parse their names and compare
-// unix seconds from names with the initial value, and stop when
-// higher value is found, marking it as a target
+// logic is the following: at the start of the application current timestamp is saved
+// then traversing over all directories inside target dir is initiated.
+// Every dir name is matched against pattern, if found - date time from dir name
+// is parsed and  result timestamp is matched against application start time.
+// Function stops as soon as matched date time is higher then initial one
 func lookupResultsDir(ctx context.Context, dir string) error {
 	l.Println("Searching for results directory...")
 	for {
@@ -127,7 +128,7 @@ func lookupResultsDir(ctx context.Context, dir string) error {
 		// and stops further lookup
 		select {
 		case <-ctx.Done():
-			return errors.New("Process stopped by user")
+			return errStoppedByUser
 		default:
 		}
 
@@ -135,9 +136,10 @@ func lookupResultsDir(ctx context.Context, dir string) error {
 		if err == errFound {
 			break
 		}
-		if err != nil && err != errFound {
+		if err != nil {
 			return err
 		}
+
 		time.Sleep(time.Second * 5)
 	}
 
@@ -150,7 +152,7 @@ func waitForLog(ctx context.Context) error {
 		// and stops further lookup
 		select {
 		case <-ctx.Done():
-			return errors.New("Process stopped by user")
+			return errStoppedByUser
 		default:
 		}
 
@@ -188,9 +190,9 @@ func userLineProcess(lb []byte) {
 
 	switch status := string(split[3]); status {
 	case "START":
-		c.IncUsersKey(scenario)
+		influx.IncUsersKey(scenario)
 	case "END":
-		c.DecUsersKey(scenario)
+		influx.DecUsersKey(scenario)
 	}
 }
 
@@ -207,11 +209,11 @@ func requestLineProcess(lb []byte) {
 			"groups":      string(split[2]),
 			"result":      string(split[6]),
 			"testId":      testID,
+			"nodeName":    nodeName,
 		},
 		map[string]interface{}{
 			"userId":       int(userID),
 			"duration":     int(stop - start),
-			"nodeName":     nodeName,
 			"errorMessage": string(bytes.TrimSpace(split[7])),
 		},
 		timeFromUnixBytes(split[5]),
@@ -219,7 +221,7 @@ func requestLineProcess(lb []byte) {
 	if err != nil {
 		l.Printf("Error creating new point: %v\n", err)
 	}
-	c.SendPoint(point)
+	influx.SendPoint(point)
 }
 
 func groupLineProcess(lb []byte) {
@@ -247,7 +249,7 @@ func groupLineProcess(lb []byte) {
 	if err != nil {
 		l.Printf("Error creating new point: %v\n", err)
 	}
-	c.SendPoint(point)
+	influx.SendPoint(point)
 }
 
 func runLineProcess(lb []byte) {
@@ -266,7 +268,7 @@ func runLineProcess(lb []byte) {
 		},
 		timeFromUnixBytes(split[3]),
 	)
-	c.SendPoint(point)
+	influx.SendPoint(point)
 }
 
 func errorLineProcess(lb []byte) {
@@ -283,7 +285,7 @@ func errorLineProcess(lb []byte) {
 		},
 		timeFromUnixBytes(bytes.TrimSpace(split[2])),
 	)
-	c.SendPoint(point)
+	influx.SendPoint(point)
 }
 
 func stringProcessor(line []byte) {
@@ -350,32 +352,33 @@ func parseStart(ctx context.Context, wg *sync.WaitGroup) {
 }
 
 // RunMain performs main application logic
-func RunMain(ctx context.Context, cmd *cobra.Command, dir string) {
-	testID, _ = cmd.Flags().GetString("testid")
-	waitTime, _ = cmd.Flags().GetUint("stoptimeout")
+func RunMain(cmd *cobra.Command, dir string) {
+	testID, _ = cmd.Flags().GetString("test-id")
+	waitTime, _ = cmd.Flags().GetUint("stop-timeout")
 	rand.Seed(time.Now().UnixNano())
 	nodeName, _ = os.Hostname()
 	l.Printf("Searching for directory at %s", dir)
-	if err := lookupGatlingDir(ctx, dir); err != nil {
+	if err := lookupTargetDir(cmd.Context(), dir); err != nil {
 		l.Fatalf("Target directory lookup failed with error: %v\n", err)
 	}
-	if err := lookupResultsDir(ctx, dir); err != nil {
+	if err := lookupResultsDir(cmd.Context(), dir); err != nil {
 		l.Fatalf("Error happened while searching for results directory: %v\n", err)
 	}
-	if err := waitForLog(ctx); err != nil {
+	if err := waitForLog(cmd.Context()); err != nil {
 		l.Fatalf("Failed waiting for simulation.log with error: %v\n", err)
 	}
+
 	wg := &sync.WaitGroup{}
 	pCtx, pCancel := context.WithCancel(context.Background())
 	cCtx, cCancel := context.WithCancel(context.Background())
 	wg.Add(2)
 	go parseStart(pCtx, wg)
-	go c.StartProcessing(cCtx, wg)
+	go influx.StartProcessing(cCtx, wg)
 
 FinisherLoop:
 	for {
 		select {
-		case <-ctx.Done():
+		case <-cmd.Context().Done():
 			pCancel()
 		case <-parserStopped:
 			cCancel()
