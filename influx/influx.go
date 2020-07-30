@@ -25,6 +25,7 @@ package influx
 import (
 	"context"
 	"fmt"
+	"log"
 	"runtime"
 	"sync"
 	"time"
@@ -45,6 +46,7 @@ type testInfo struct {
 	simulationName string
 	description    string
 	nodeName       string
+	testStartTime  time.Time
 }
 
 func (s *syncUsers) GetSnapshot() map[string]int {
@@ -64,7 +66,7 @@ const (
 
 var (
 	c         infc.Client
-	l         = logger.GetLogger()
+	l         *log.Logger
 	dbName    string
 	info      testInfo
 	lastPoint = time.Now()
@@ -83,6 +85,23 @@ var (
 	maxPoints        uint = 5000
 	writeDataTimeout      = 10
 )
+
+// InitTestInfo collect basic test information to be used by Influx client
+func InitTestInfo(testID, simulationName, description, nodeName string, testStartTime time.Time) {
+	info = testInfo{
+		testID:         testID,
+		simulationName: simulationName,
+		description:    description,
+		nodeName:       nodeName,
+		testStartTime:  testStartTime,
+	}
+}
+
+// NewPoint is mostly an alias fo standard NewPoint function from influx package,
+// but timestamp is required
+func NewPoint(name string, tags map[string]string, fields map[string]interface{}, t time.Time) (*infc.Point, error) {
+	return infc.NewPoint(name, tags, fields, t)
+}
 
 // SendPoint sends point to the channel listened by metrics consumer
 func SendPoint(p *infc.Point) {
@@ -105,7 +124,6 @@ func DecUsersKey(scenario string) {
 		return
 	}
 	users.u[scenario]--
-
 }
 
 func sendBatch(points []*infc.Point) {
@@ -159,7 +177,6 @@ GatherLoop:
 func gatherPointMetrics(ctx context.Context, wg *sync.WaitGroup) {
 	defer wg.Done()
 	var points []*infc.Point
-	infoRequired := true
 
 	timer := time.NewTimer(time.Second * time.Duration(writeDataTimeout))
 GatherLoop:
@@ -173,19 +190,6 @@ GatherLoop:
 			}
 			timer.Reset(time.Second * time.Duration(writeDataTimeout))
 		case p := <-pc:
-			// this check searches for test start point and extracts test info from it
-			if infoRequired {
-				if p.Name() == "testStartEnd" {
-					fields, _ := p.Fields()
-					info = testInfo{
-						testID:         p.Tags()["testId"],
-						simulationName: p.Tags()["simulationName"],
-						description:    fields["description"].(string),
-						nodeName:       fields["nodeName"].(string),
-					}
-				}
-				infoRequired = false
-			}
 			points = append(points, p)
 			if len(points) == int(maxPoints) {
 				sendBatch(points)
@@ -257,6 +261,9 @@ func StartProcessing(ctx context.Context, owg *sync.WaitGroup) {
 
 // InitInfluxConnection checks if connection with InfluxDB is successful
 func InitInfluxConnection(cmd *cobra.Command) error {
+	// Getting logger for package
+	l = logger.GetLogger()
+
 	username, _ := cmd.Flags().GetString("username")
 	password, _ := cmd.Flags().GetString("password")
 	address, _ := cmd.Flags().GetString("address")
