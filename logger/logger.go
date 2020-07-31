@@ -9,6 +9,8 @@ import (
 	"sync"
 )
 
+// TODO: Rewrite logger to expose only direct methods like Error(f|ln) Info(f|ln) Debug(f|ln)
+// that will add prefixes to log lines
 var (
 	// logger is a single local logger implementation
 	logger *log.Logger

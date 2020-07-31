@@ -41,6 +41,7 @@ import (
 
 	"github.com/dakaraj/gatling-to-influxdb/influx"
 	"github.com/dakaraj/gatling-to-influxdb/logger"
+	"github.com/dakaraj/gatling-to-influxdb/types"
 
 	// infc "github.com/influxdata/influxdb1-client/v2"
 	"github.com/spf13/cobra"
@@ -49,6 +50,12 @@ import (
 const (
 	oneMillisecond        = 1_000_000
 	simulationLogFileName = "simulation.log"
+	// Constant amounts of elements per log line
+	runLineLen     = 6
+	requestLineLen = 8
+	groupLineLen   = 7
+	userLineLen    = 6
+	errorLineLen   = 3
 )
 
 var (
@@ -59,6 +66,7 @@ var (
 
 	errFound         = errors.New("Found")
 	errStoppedByUser = errors.New("Process stopped by user")
+	errFatal         = errors.New("Fatal error")
 	logDir           string
 	testID           string
 	simulationName   string
@@ -172,7 +180,6 @@ func waitForLog(ctx context.Context) error {
 		}
 
 		// WARNING: second part of this check may fail on Windows. Not tested
-		fmt.Println(fInfo.Mode().Perm())
 		if fInfo.Mode().IsRegular() && (runtime.GOOS == "windows" || fInfo.Mode().Perm() == 420) {
 			abs, _ := filepath.Abs(logDir + "/" + simulationLogFileName)
 			l.Printf("Found %s\n", abs)
@@ -195,20 +202,36 @@ func timeFromUnixBytes(ub []byte) (time.Time, error) {
 	return time.Unix(0, timeStamp*oneMillisecond+rand.Int63n(oneMillisecond)), nil
 }
 
-func userLineProcess(lb []byte) {
+func userLineProcess(lb []byte) error {
 	split := bytes.Split(lb, tabSep)
-	scenario := string(split[1])
-
-	switch status := string(split[3]); status {
-	case "START":
-		influx.IncUsersKey(scenario)
-	case "END":
-		influx.DecUsersKey(scenario)
+	if len(split) != userLineLen {
+		return errors.New("USER line contains unexpected amount of values")
 	}
+	scenario := string(split[1])
+	timestamp, err := timeFromUnixBytes(split[4])
+	if err != nil {
+		return err
+	}
+
+	influx.SendUserLineData(types.NewUserLineData(timestamp, scenario, string(split[3])))
+
+	// TODO change logic completely
+	// Don't use last element, ot trim beforehand
+	// switch status := string(split[3]); status {
+	// case "START":
+	// 	influx.IncUsersKey(scenario)
+	// case "END":
+	// 	influx.DecUsersKey(scenario)
+	// }
+
+	return nil
 }
 
 func requestLineProcess(lb []byte) error {
 	split := bytes.Split(lb, tabSep)
+	if len(split) != requestLineLen {
+		return errors.New("REQUEST line contains unexpected amount of values")
+	}
 
 	userID, err := strconv.ParseInt(string(split[1]), 10, 32)
 	if err != nil {
@@ -222,30 +245,30 @@ func requestLineProcess(lb []byte) error {
 	if err != nil {
 		return fmt.Errorf("Failed to parse request end time in line as integer: %w", err)
 	}
-	ts, err := timeFromUnixBytes(split[5])
+	timestamp, err := timeFromUnixBytes(split[5])
 	if err != nil {
 		return err
 	}
 
 	point, err := influx.NewPoint(
-		"rawRequests",
+		"requests",
 		map[string]string{
-			"requestName": string(split[3]),
-			"groups":      string(split[2]),
-			"result":      string(split[6]),
-			"simulation":  simulationName,
-			"testId":      testID,
-			"nodeName":    nodeName,
+			"name":       string(split[3]),
+			"groups":     string(split[2]),
+			"result":     string(split[6]),
+			"simulation": simulationName,
+			"testId":     testID,
+			"nodeName":   nodeName,
 		},
 		map[string]interface{}{
 			"userId":       int(userID),
 			"duration":     int(end - start),
 			"errorMessage": string(bytes.TrimSpace(split[7])),
 		},
-		ts,
+		timestamp,
 	)
 	if err != nil {
-		return fmt.Errorf("Error creating new point: %w", err)
+		return fmt.Errorf("Error creating new point with request data: %w", err)
 	}
 
 	influx.SendPoint(point)
@@ -253,38 +276,66 @@ func requestLineProcess(lb []byte) error {
 	return nil
 }
 
-func groupLineProcess(lb []byte) {
+func groupLineProcess(lb []byte) error {
 	split := bytes.Split(lb, tabSep)
+	if len(split) != groupLineLen {
+		return errors.New("GROUP line contains unexpected amount of values")
+	}
 
-	userID, _ := strconv.ParseInt(string(split[1]), 10, 32)
-	start, _ := strconv.ParseInt(string(split[3]), 10, 64)
-	stop, _ := strconv.ParseInt(string(split[4]), 10, 64)
-	duration, _ := strconv.ParseInt(string(split[5]), 10, 32)
-	point, err := infc.NewPoint(
-		"rawGroups",
+	userID, err := strconv.ParseInt(string(split[1]), 10, 32)
+	if err != nil {
+		return fmt.Errorf("Failed to parse userID in line as integer: %w", err)
+	}
+	start, err := strconv.ParseInt(string(split[3]), 10, 64)
+	if err != nil {
+		return fmt.Errorf("Failed to parse group start time in line as integer: %w", err)
+	}
+	end, err := strconv.ParseInt(string(split[4]), 10, 64)
+	if err != nil {
+		return fmt.Errorf("Failed to parse group end time in line as integer: %w", err)
+	}
+	rawDuration, err := strconv.ParseInt(string(split[5]), 10, 32)
+	if err != nil {
+		return fmt.Errorf("Failed to parse group raw duration in line as integer: %w", err)
+	}
+	timestamp, err := timeFromUnixBytes(split[5])
+	if err != nil {
+		return err
+	}
+
+	point, err := influx.NewPoint(
+		"groups",
 		map[string]string{
-			"name":   string(split[2]),
-			"result": string(split[6][:2]),
-			"testId": testID,
+			"name":       string(split[2]),
+			"result":     string(split[6][:2]),
+			"simulation": simulationName,
+			"testId":     testID,
+			"nodeName":   nodeName,
 		},
 		map[string]interface{}{
 			"userId":        int(userID),
-			"totalDuration": int(stop - start),
-			"duration":      int(duration),
-			"nodeName":      nodeName,
+			"totalDuration": int(end - start),
+			"rawDuration":   int(rawDuration),
 		},
-		timeFromUnixBytes(split[4]),
+		timestamp,
 	)
 	if err != nil {
-		l.Printf("Error creating new point: %v\n", err)
+		return fmt.Errorf("Error creating new point with group data: %w", err)
 	}
+
 	influx.SendPoint(point)
+
+	return nil
 }
 
 // This method should be called first when parsing started as it is based
 // on information from the header row
 func runLineProcess(lb []byte) error {
 	split := bytes.Split(lb, tabSep)
+	if len(split) != runLineLen {
+		return errors.New("RUN line contains unexpected amount of values")
+	}
+
 	simulationName = string(split[1])
 	description := string(split[4])
 	testStartTime, err := timeFromUnixBytes(split[3])
@@ -292,23 +343,24 @@ func runLineProcess(lb []byte) error {
 		return err
 	}
 
+	// This will initialize required data for influx client
 	influx.InitTestInfo(testID, simulationName, description, nodeName, testStartTime)
 
 	point, err := influx.NewPoint(
-		"testStartEnd",
+		"tests",
 		map[string]string{
-			"action":         "start",
-			"testId":         testID,
-			"simulationName": simulationName,
+			"action":     "start",
+			"simulation": simulationName,
+			"testId":     testID,
+			"nodeName":   nodeName,
 		},
 		map[string]interface{}{
 			"description": description,
-			"nodeName":    nodeName,
 		},
 		testStartTime,
 	)
 	if err != nil {
-		return fmt.Errorf("Error creating new point: %w", err)
+		return fmt.Errorf("Error creating new point with test start data: %w", err)
 	}
 
 	influx.SendPoint(point)
@@ -316,45 +368,60 @@ func runLineProcess(lb []byte) error {
 	return nil
 }
 
-func errorLineProcess(lb []byte) {
+func errorLineProcess(lb []byte) error {
 	split := bytes.Split(lb, tabSep)
+	if len(split) != errorLineLen {
+		return errors.New("ERROR line contains unexpected amount of values")
+	}
+	timestamp, err := timeFromUnixBytes(bytes.TrimSpace(split[2]))
+	if err != nil {
+		return err
+	}
 
-	point, _ := infc.NewPoint(
+	point, err := influx.NewPoint(
 		"errors",
 		map[string]string{
-			"testId": testID,
+			"testId":     testID,
+			"nodeName":   nodeName,
+			"simulation": simulationName,
 		},
 		map[string]interface{}{
 			"errorMessage": string(split[1]),
-			"nodeName":     nodeName,
 		},
-		timeFromUnixBytes(bytes.TrimSpace(split[2])),
+		timestamp,
 	)
+	if err != nil {
+		return fmt.Errorf("Error creating new point with error data: %w", err)
+	}
+
 	influx.SendPoint(point)
+
+	return nil
 }
 
 func stringProcessor(lineBuffer []byte) error {
 	switch {
 	case requestLine.Match(lineBuffer):
 		return requestLineProcess(lineBuffer)
-	case userLine.Match(lineBuffer):
-		userLineProcess(lineBuffer)
-		return nil
 	case groupLine.Match(lineBuffer):
 		return groupLineProcess(lineBuffer)
-	case runLine.Match(lineBuffer):
-		return runLineProcess(lineBuffer)
+	case userLine.Match(lineBuffer):
+		return userLineProcess(lineBuffer)
 	case errorLine.Match(lineBuffer):
 		return errorLineProcess(lineBuffer)
+	case runLine.Match(lineBuffer):
+		err := runLineProcess(lineBuffer)
+		if err != nil {
+			err = fmt.Errorf("%v: %w", err, errFatal)
+		}
+		return err
 	default:
 		return fmt.Errorf("Unknown line type encountered")
 	}
 }
 
-func parseLoop(ctx context.Context, file *os.File) {
-	// TODO: Clean old commented code
+func fileProcessor(ctx context.Context, file *os.File) {
 	r := bufio.NewReader(file)
-	// var buf []byte
 	buf := new(bytes.Buffer)
 	startWait := time.Now()
 ParseLoop:
@@ -376,7 +443,6 @@ ParseLoop:
 				break ParseLoop
 			}
 			// All new data is stored in buffer until next loop
-			// buf = append(buf, b...)
 			buf.Write(b)
 			time.Sleep(time.Second)
 			continue
@@ -385,14 +451,16 @@ ParseLoop:
 			l.Printf("Unexpected error encountered while parsing file: %v", err)
 		}
 
-		// buf = append(buf, b...)
 		buf.Write(b)
 		err = stringProcessor(buf.Bytes())
 		if err != nil {
 			l.Printf("String processing failed: %v", err)
+			if errors.Is(err, errFatal) {
+				l.Println("Log parser caught an error that can't be handled. Stopping application...")
+				break ParseLoop
+			}
 		}
 		// Clean buffer after processing preparing for a new loop
-		// buf = []byte{}
 		buf.Reset()
 		// Reset a timeout timer
 		startWait = time.Now()
@@ -410,7 +478,7 @@ func parseStart(ctx context.Context, wg *sync.WaitGroup) {
 	}
 	defer file.Close()
 
-	parseLoop(ctx, file)
+	fileProcessor(ctx, file)
 }
 
 // RunMain performs main application logic
