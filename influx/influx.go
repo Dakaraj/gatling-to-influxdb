@@ -31,8 +31,8 @@ import (
 	"time"
 
 	"github.com/dakaraj/gatling-to-influxdb/logger"
-	"github.com/dakaraj/gatling-to-influxdb/types"
 	_ "github.com/influxdata/influxdb1-client" // workaround from client documentation
+	client "github.com/influxdata/influxdb1-client/v2"
 	infc "github.com/influxdata/influxdb1-client/v2"
 	"github.com/spf13/cobra"
 )
@@ -45,20 +45,10 @@ type testInfo struct {
 	testStartTime  time.Time
 }
 
-type syncUsers struct {
-	m sync.Mutex
-	u map[string]int
-}
-
-func (s *syncUsers) GetSnapshot() map[string]int {
-	m := make(map[string]int)
-	s.m.Lock()
-	for k, v := range s.u {
-		m[k] = v
-	}
-	s.m.Unlock()
-
-	return m
+type userLineData struct {
+	timestamp time.Time
+	scenario  string
+	status    string
 }
 
 const (
@@ -72,15 +62,10 @@ var (
 	info      testInfo
 	lastPoint time.Time
 
-	// users is a thread safe map for storing current snapshot of users
-	// amount generated
-	users = syncUsers{
-		m: sync.Mutex{},
-		u: make(map[string]int),
-	}
-
 	// pc is a channel to send all point from parser to
 	pc = make(chan *infc.Point, 1000)
+	// uc is a channel for userLineData processing
+	uc = make(chan userLineData, 1000)
 
 	// TODO: parameterize later
 	maxPoints        uint
@@ -107,24 +92,6 @@ func NewPoint(name string, tags map[string]string, fields map[string]interface{}
 // SendPoint sends point to the channel listened by metrics consumer
 func SendPoint(p *infc.Point) {
 	pc <- p
-}
-
-// IncUsersKey increments amount of users for given scenario
-func IncUsersKey(scenario string) {
-	users.m.Lock()
-	users.u[scenario]++
-	users.m.Unlock()
-}
-
-// DecUsersKey decrements amount of users for given scenario
-func DecUsersKey(scenario string) {
-	users.m.Lock()
-	defer users.m.Unlock()
-	if users.u[scenario] == 1 {
-		delete(users.u, scenario)
-		return
-	}
-	users.u[scenario]--
 }
 
 func sendBatch(points []*infc.Point) {
@@ -162,39 +129,119 @@ SendLoop:
 }
 
 // SendUserLineData takes a line with user data and adds it to the processing list
-func SendUserLineData(uld *types.UserLineData) {
-	_ = uld
+func SendUserLineData(timestamp time.Time, scenario, status string) {
+	uld := userLineData{timestamp, scenario, status}
+
+	uc <- uld
+}
+
+func sendUserData(m map[string]int, ts time.Time) error {
+	fmt.Printf("%#v\n", m)
+	// Prepare points
+	for k, v := range m {
+		point, err := client.NewPoint(
+			"users",
+			map[string]string{
+				"scenario": k,
+				"testId":   info.testID,
+				"nodeName": info.nodeName,
+			},
+			map[string]interface{}{
+				"active": v,
+			},
+			ts,
+		)
+		if err != nil {
+			return fmt.Errorf("Error creating new point with user data: %w", err)
+		}
+
+		pc <- point
+	}
+
+	return nil
 }
 
 func usersProcessor(ctx context.Context, wg *sync.WaitGroup) {
+	// Send current user state to database each N seconds
+	const timeRangeLen = 5
 	defer wg.Done()
 
-	ticker := time.NewTicker(time.Second * userMetricsTicker)
-	defer ticker.Stop()
-GatherLoop:
+	// Workaround:
+	// Wait for testInfo to fill
+	for {
+		if !info.testStartTime.IsZero() {
+			break
+		}
+		time.Sleep(time.Second)
+	}
+
+	secondFrom := info.testStartTime.Round(time.Second)
+	secondTo := secondFrom.Add(time.Second * timeRangeLen)
+	usersMap := make(map[string]int)
+	// fmt.Println(secondFrom, secondTo)
+	// os.Exit(0)
+
+CollectorLoop:
 	for {
 		select {
-		case t := <-ticker.C:
-			snap := users.GetSnapshot()
-			if len(snap) > 0 {
-				for k, v := range snap {
-					p, _ := infc.NewPoint(
-						"users",
-						map[string]string{
-							"scenario": k,
-							"testId":   info.testID,
-						},
-						map[string]interface{}{
-							"active":   v,
-							"nodeName": info.nodeName,
-						},
-						t,
-					)
-					pc <- p
+		case <-ctx.Done():
+			// Init closeup
+			closingPointTime := lastPoint
+			// Fill empty points with last available data
+			for secondTo.Before(closingPointTime) {
+				// Advance searching range for next N seconds
+				secondFrom, secondTo = secondTo, secondTo.Add(time.Second*timeRangeLen)
+
+				// And send data for previous range
+				err := sendUserData(usersMap, secondFrom)
+				if err != nil {
+					l.Printf("Failed to send user data: %v", err)
 				}
 			}
-		case <-ctx.Done():
-			break GatherLoop
+
+			break CollectorLoop
+		case p := <-uc:
+		SearcherLoop:
+			for {
+				// If point is somehow from the past
+				if p.timestamp.Before(secondFrom) {
+					// Then we just update the map
+					switch p.status {
+					case "START":
+						usersMap[p.scenario]++
+					case "END":
+						usersMap[p.scenario]--
+					}
+
+					break SearcherLoop
+				}
+
+				// TODO: May combine with previous one later
+				// If timestamp is a part of the current time range
+				if (p.timestamp.After(secondFrom) || p.timestamp.Equal(secondFrom)) && p.timestamp.Before(secondTo) {
+					// We update the map
+					switch p.status {
+					case "START":
+						usersMap[p.scenario]++
+					case "END":
+						usersMap[p.scenario]--
+					}
+
+					break SearcherLoop
+				}
+
+				// Else we assume this time range is done and advance searching range for next N seconds
+				secondFrom, secondTo = secondTo, secondTo.Add(time.Second*timeRangeLen)
+
+				// And send data for previous range
+				err := sendUserData(usersMap, secondFrom)
+				if err != nil {
+					l.Printf("Failed to send user data: %v", err)
+				}
+				fmt.Println("Debug")
+
+				// Loop is then advanced looking for suitable range
+			}
 		}
 	}
 }
@@ -228,7 +275,10 @@ CollectorLoop:
 				timer.Reset(time.Second * time.Duration(writeDataTimeout))
 			}
 			// Each point received saves its timestamp for use as a closing point
-			lastPoint = p.Time()
+			// Don't use users data because it has aggregated time stamp instead of concrete one
+			if p.Name() != "users" {
+				lastPoint = p.Time()
+			}
 		// Await for external stop signal
 		case <-ctx.Done():
 			// Send any unsent points
@@ -253,7 +303,7 @@ func sendClosingPoint() {
 	p, _ := infc.NewPoint(
 		"testStartEnd",
 		map[string]string{
-			"action":         "finish",
+			"action":         "end",
 			"testId":         info.testID,
 			"simulationName": info.simulationName,
 		},

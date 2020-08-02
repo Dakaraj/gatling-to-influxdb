@@ -41,7 +41,6 @@ import (
 
 	"github.com/dakaraj/gatling-to-influxdb/influx"
 	"github.com/dakaraj/gatling-to-influxdb/logger"
-	"github.com/dakaraj/gatling-to-influxdb/types"
 
 	// infc "github.com/influxdata/influxdb1-client/v2"
 	"github.com/spf13/cobra"
@@ -208,21 +207,14 @@ func userLineProcess(lb []byte) error {
 		return errors.New("USER line contains unexpected amount of values")
 	}
 	scenario := string(split[1])
-	timestamp, err := timeFromUnixBytes(split[4])
+	// Using the second of the two timestamps
+	// A user life duration may come in handy later
+	timestamp, err := timeFromUnixBytes(bytes.TrimSpace(split[5]))
 	if err != nil {
 		return err
 	}
 
-	influx.SendUserLineData(types.NewUserLineData(timestamp, scenario, string(split[3])))
-
-	// TODO change logic completely
-	// Don't use last element, ot trim beforehand
-	// switch status := string(split[3]); status {
-	// case "START":
-	// 	influx.IncUsersKey(scenario)
-	// case "END":
-	// 	influx.DecUsersKey(scenario)
-	// }
+	influx.SendUserLineData(timestamp, scenario, string(split[3]))
 
 	return nil
 }
