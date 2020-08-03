@@ -61,6 +61,7 @@ var (
 	dbName    string
 	info      testInfo
 	lastPoint time.Time
+	maxPoints uint
 
 	// pc is a channel to send all point from parser to
 	pc = make(chan *infc.Point, 1000)
@@ -68,7 +69,6 @@ var (
 	uc = make(chan userLineData, 1000)
 
 	// TODO: parameterize later
-	maxPoints        uint
 	writeDataTimeout = 10
 )
 
@@ -135,9 +135,9 @@ func SendUserLineData(timestamp time.Time, scenario, status string) {
 	uc <- uld
 }
 
-func sendUserData(m map[string]int, ts time.Time) error {
-	fmt.Printf("%#v\n", m)
+func sendUserData(m map[string]int, ts time.Time) ([]*client.Point, error) {
 	// Prepare points
+	points := make([]*client.Point, 0, len(m))
 	for k, v := range m {
 		point, err := client.NewPoint(
 			"users",
@@ -152,13 +152,14 @@ func sendUserData(m map[string]int, ts time.Time) error {
 			ts,
 		)
 		if err != nil {
-			return fmt.Errorf("Error creating new point with user data: %w", err)
+			return nil, fmt.Errorf("Error creating new point with user data: %w", err)
 		}
 
-		pc <- point
+		points = append(points, point)
+
 	}
 
-	return nil
+	return points, nil
 }
 
 func usersProcessor(ctx context.Context, wg *sync.WaitGroup) {
@@ -178,28 +179,45 @@ func usersProcessor(ctx context.Context, wg *sync.WaitGroup) {
 	secondFrom := info.testStartTime.Round(time.Second)
 	secondTo := secondFrom.Add(time.Second * timeRangeLen)
 	usersMap := make(map[string]int)
-	// fmt.Println(secondFrom, secondTo)
-	// os.Exit(0)
 
 CollectorLoop:
 	for {
 		select {
+		// If an external cancellation signal is received
 		case <-ctx.Done():
 			// Init closeup
 			closingPointTime := lastPoint
+			var points []*client.Point
 			// Fill empty points with last available data
-			for secondTo.Before(closingPointTime) {
+			// Last point in buffer should always be sent. So this is an imitation of do-while loop
+			for {
 				// Advance searching range for next N seconds
 				secondFrom, secondTo = secondTo, secondTo.Add(time.Second*timeRangeLen)
 
-				// And send data for previous range
-				err := sendUserData(usersMap, secondFrom)
+				// Collect remaining points
+				pts, err := sendUserData(usersMap, secondFrom)
 				if err != nil {
 					l.Printf("Failed to send user data: %v", err)
+					continue
+				}
+				points = append(points, pts...)
+
+				// Stop the loop when meeting the closing point time
+				if !secondTo.Before(closingPointTime) {
+					break
 				}
 			}
+			// If total amount of points is higher than allowed batch amount
+			// it is split and sent in batches
+			for len(points) > int(maxPoints) {
+				sendBatch(points[:int(maxPoints)])
+				points = points[int(maxPoints):]
+			}
+			sendBatch(points)
 
 			break CollectorLoop
+
+		// On each new user line data
 		case p := <-uc:
 		SearcherLoop:
 			for {
@@ -234,11 +252,14 @@ CollectorLoop:
 				secondFrom, secondTo = secondTo, secondTo.Add(time.Second*timeRangeLen)
 
 				// And send data for previous range
-				err := sendUserData(usersMap, secondFrom)
+				points, err := sendUserData(usersMap, secondFrom)
 				if err != nil {
 					l.Printf("Failed to send user data: %v", err)
+					continue
 				}
-				fmt.Println("Debug")
+				for _, p := range points {
+					pc <- p
+				}
 
 				// Loop is then advanced looking for suitable range
 			}
@@ -294,22 +315,22 @@ CollectorLoop:
 func sendClosingPoint() {
 	// If info struct is empty, then parsing of file did not start,
 	// so there is no need to send closing point
-	if info.testID == "" {
+	if info.testStartTime.IsZero() {
 		l.Println("Skipping stop test point write...")
 		return
 	}
 
 	// Create a point signifying a test end
 	p, _ := infc.NewPoint(
-		"testStartEnd",
+		"tests",
 		map[string]string{
-			"action":         "end",
-			"testId":         info.testID,
-			"simulationName": info.simulationName,
+			"action":     "end",
+			"simulation": info.simulationName,
+			"testId":     info.testID,
+			"nodeName":   info.nodeName,
 		},
 		map[string]interface{}{
 			"description": info.description,
-			"nodeName":    info.nodeName,
 		},
 		// Add 5 secods to the time since last point was received
 		lastPoint.Add(time.Second*5),
