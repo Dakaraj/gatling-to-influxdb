@@ -1,5 +1,5 @@
 /*
-Copyright © 2019 Anton Kramarev
+Copyright © 2020 Anton Kramarev
 
 Permission is hereby granted, free of charge, to any person obtaining a copy
 of this software and associated documentation files (the "Software"), to deal
@@ -25,36 +25,40 @@ package cmd
 import (
 	"context"
 	"fmt"
+	"log"
 	"os"
 	"os/exec"
 	"os/signal"
 	"syscall"
 
-	"github.com/dakaraj/gatling-to-influxdb/client"
-	"github.com/dakaraj/gatling-to-influxdb/logger"
+	"github.com/dakaraj/gatling-to-influxdb/influx"
+	l "github.com/dakaraj/gatling-to-influxdb/logger"
 	"github.com/dakaraj/gatling-to-influxdb/parser"
 	"github.com/spf13/cobra"
 )
 
 var (
-	l = logger.GetLogger()
-
 	ctx    context.Context
 	cancel context.CancelFunc
 )
 
 func preRunSetup(cmd *cobra.Command, args []string) error {
-	// Workaround for a mandatory testid (t) flag
-	if t, _ := cmd.Flags().GetString("testid"); t == "" {
-		l.Fatalln("Test identifier is not provided. Please provide some value with --testid (-t) flag")
+	// // Workaround for a mandatory testid (t) flag
+	// if t, _ := cmd.Flags().GetString("test-id"); t == "" {
+	// 	fmt.Print("Test identifier is not provided. Please provide some value with --testid (-t) flag\n\n")
+	// 	cmd.Help()
+	// 	os.Exit(1)
+	// }
+	// // End of workaround
+
+	// Check if InfluxDB connection is successfull before going to detached mode
+	err := influx.InitInfluxConnection(cmd)
+	if err != nil {
+		return fmt.Errorf("Failed to establish successful database connection: %w", err)
 	}
-	// End of workaround
 
-	// set up context
-	ctx, cancel = context.WithCancel(context.Background())
-
-	// If detached state is requested - filter out -d flag and start
-	// new process returning its PID. Then close this process
+	// If detached state is requested, filter out corresponding flags and start new process
+	// returning with same arguments printing its PID. Then close the initial process
 	if d, _ := cmd.Flags().GetBool("detached"); d {
 		newArgs := make([]string, 0, len(os.Args)-2)
 		for _, a := range os.Args[1:] {
@@ -66,30 +70,31 @@ func preRunSetup(cmd *cobra.Command, args []string) error {
 
 		command := exec.Command(os.Args[0], newArgs...)
 		if err := command.Start(); err != nil {
-			return err
+			return fmt.Errorf("Failed to start a detached process: %w", err)
 		}
 		pid := command.Process.Pid
 		fmt.Printf("[PID]\t%d\n", pid)
 		os.Exit(0)
 	}
 
-	// catcher of SIGKILL SIGTERM signals
+	// catcher of SIGINT SIGTERM signals
 	go func() {
 		c := make(chan os.Signal, 1)
 		signal.Notify(c, syscall.SIGINT, syscall.SIGTERM)
 		sig := <-c
-		l.Printf("Received signal %v. Stopping application...", sig)
+		l.Infof("Received signal %v. Stopping application...\n", sig)
 		cancel()
 	}()
 
-	l.Println("Starting application...")
-	return client.SetUpInfluxConnection(cmd)
+	l.Infoln("Starting application...")
+
+	return nil
 }
 
 // rootCmd represents the base command when called without any subcommands
 var rootCmd = &cobra.Command{
-	Use: "g2i path/to/target/gatling",
-	Example: `g2i ./target/gatling -t "some-test-id"
+	Use: "g2i [path/to/results/dir]",
+	Example: `g2i ./target/gatling -t "some-test-id" -d -l "/var/log/g2i.log"
 
 Will first check InfluxDB connection.
 Then will search for the latest results directory or wait for it to appear.
@@ -98,31 +103,43 @@ Next will search for simulation.log file to appear and start processing it.`,
 	Long: `This application allows writing raw Gatling load testing
 tool logs directly to InfluxDB avoiding unnecessary
 complications of Graphite protocol.`,
-	Version: "v0.0.3",
+	Version: "v0.1.0",
 	PreRunE: preRunSetup,
 	Args:    cobra.ExactArgs(1),
 	Run: func(cmd *cobra.Command, args []string) {
-		parser.RunMain(ctx, cmd, args[0])
+		parser.RunMain(cmd, args[0])
 	},
 }
 
 // Execute adds all child commands to the root command and sets flags appropriately.
 // This is called by main.main(). It only needs to happen once to the rootCmd.
 func Execute() {
-	if err := rootCmd.Execute(); err != nil {
-		l.Fatalln(err)
+	// Initiating logger before any other processes start
+	logPath, _ := rootCmd.Flags().GetString("log")
+	err := l.InitLogger(logPath)
+	if err != nil {
+		log.Fatalf("Failed to init application logger: %v\n", err)
+	}
+
+	if err := rootCmd.ExecuteContext(ctx); err != nil {
+		l.Errorln(err)
+		os.Exit(1)
 	}
 }
 
 func init() {
+	rootCmd.Flags().BoolP("help", "h", false, "Display this help for g2i application")
+	rootCmd.Flags().BoolP("version", "v", false, "Display current g2i application version")
 	rootCmd.Flags().BoolP("detached", "d", false, "Run application in background. Returns [PID] on start")
 	rootCmd.Flags().StringP("address", "a", "http://localhost:8086", "HTTP address and port of InfluxDB instance")
 	rootCmd.Flags().StringP("username", "u", "", "Username credential for InfluxDB instance")
 	rootCmd.Flags().StringP("password", "p", "", "Password credential for InfluxDB instance")
-	rootCmd.Flags().StringP("database", "b", "gatling", "Name of the database in InfluxDB")
-	rootCmd.Flags().StringP("testid", "t", "", "Unique test identifier (REQUIRED)")
-	rootCmd.Flags().UintP("stoptimeout", "s", 60, "Time (seconds) to exit if no new log lines found")
-	// Seems like an issue: https://github.com/spf13/cobra/issues/655
-	// This mark does not work but let it stay here
-	rootCmd.MarkFlagRequired("testid")
+	rootCmd.Flags().StringP("database", "b", "gatling", "Database name in InfluxDB")
+	rootCmd.Flags().StringP("log", "l", "./log/g2i.log", "File path to application log file")
+	rootCmd.Flags().StringP("test-id", "t", "", "Unique test identifier")
+	rootCmd.Flags().UintP("stop-timeout", "s", 60, "Time (seconds) to exit if no new log lines found")
+	rootCmd.Flags().UintP("max-batch-size", "m", 5000, "Max points batch size to sent to InfluxDB")
+
+	// set up global context
+	ctx, cancel = context.WithCancel(context.Background())
 }
