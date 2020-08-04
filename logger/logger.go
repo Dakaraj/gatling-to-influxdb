@@ -28,24 +28,18 @@ import (
 	"log"
 	"os"
 	"path/filepath"
-	"sync"
 )
 
 // that will add prefixes to log lines
 var (
 	// logger is a single local logger implementation
 	logger *log.Logger
-	once   sync.Once
 	sw     io.Writer
 	ew     io.Writer
 )
 
 // InitLogger sets up a new instance of logger that writes to file and STDOUT
 func InitLogger(fileName string) error {
-	// pwd, err := os.Getwd()
-	// if err != nil {
-	// 	return fmt.Errorf("Failed to get current directory: %w", err)
-	// }
 	p, err := filepath.Abs(fileName)
 	if err != nil {
 		return fmt.Errorf("Failed to build absolute path for log file: %w", err)

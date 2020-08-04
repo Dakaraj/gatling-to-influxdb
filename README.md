@@ -61,6 +61,8 @@ For now `g2i` requires read/write access to InfluxDB, it is a workaround for che
 
 Application can be used for parsing an existing log file, but some tricky approach is required for it. Easier way will be implemented in later versions.
 
+Application works fine on Linux and MacOS but can have issues on Windows as it was not tested using this OS. Possible issue: not finding a log file or a directory containing it.
+
 No unit tests are written for application as of right now and it's absolutely not production ready or battle tested yet. But you can try it anyway :)
 
 It was also only tested on HTTP requests, no WS or other protocols were used, so if you have logs containing some data for non-HTTP protocols I'll be glad if you provide it (obfuscate data if need to) for analysis.

@@ -58,7 +58,7 @@ const (
 
 var (
 	resultDirNamePattern = regexp.MustCompile(`^.+?-(\d{14})\d{3}$`)
-	start                = time.Now().Unix()
+	startTime            = time.Now().Unix()
 	nodeName             string
 
 	errFound         = errors.New("Found")
@@ -82,6 +82,9 @@ var (
 )
 
 func lookupTargetDir(ctx context.Context, dir string) error {
+	const loopTimeout = 5 * time.Second
+
+	l.Infoln("Looking for target directory...")
 	for {
 		// This block checks if stop signal is received from user
 		// and stops further lookup
@@ -96,7 +99,7 @@ func lookupTargetDir(ctx context.Context, dir string) error {
 			return fmt.Errorf("Target path %s exists but there is an error: %w", dir, err)
 		}
 		if os.IsNotExist(err) {
-			time.Sleep(time.Second * 5)
+			time.Sleep(loopTimeout)
 			continue
 		}
 
@@ -116,7 +119,7 @@ func walkFunc(path string, info os.FileInfo, err error) error {
 	if info.IsDir() && resultDirNamePattern.MatchString(info.Name()) {
 		dateString := resultDirNamePattern.FindStringSubmatch(info.Name())[1]
 		t, _ := time.Parse("20060102150405", dateString)
-		if t.Unix() > start {
+		if t.Unix() > startTime {
 			logDir = path
 			l.Infof("Found log directory at %s", logDir)
 
@@ -133,6 +136,8 @@ func walkFunc(path string, info os.FileInfo, err error) error {
 // is parsed and  result timestamp is matched against application start time.
 // Function stops as soon as matched date time is higher then initial one
 func lookupResultsDir(ctx context.Context, dir string) error {
+	const loopTimeout = 5 * time.Second
+
 	l.Infof("Searching for results directory...")
 	for {
 		// This block checks if stop signal is received from user
@@ -151,13 +156,15 @@ func lookupResultsDir(ctx context.Context, dir string) error {
 			return err
 		}
 
-		time.Sleep(time.Second * 5)
+		time.Sleep(loopTimeout)
 	}
 
 	return nil
 }
 
 func waitForLog(ctx context.Context) error {
+	const loopTimeout = 5 * time.Second
+
 	l.Infoln("Searching for " + simulationLogFileName + " file...")
 	for {
 		// This block checks if stop signal is received from user
@@ -171,8 +178,9 @@ func waitForLog(ctx context.Context) error {
 		fInfo, err := os.Stat(logDir + "/" + simulationLogFileName)
 		if err != nil && !os.IsNotExist(err) {
 			return err
-		} else if os.IsNotExist(err) {
-			time.Sleep(time.Second * 5)
+		}
+		if os.IsNotExist(err) {
+			time.Sleep(loopTimeout)
 			continue
 		}
 
@@ -402,6 +410,7 @@ func stringProcessor(lineBuffer []byte) error {
 	case runLine.Match(lineBuffer):
 		err := runLineProcess(lineBuffer)
 		if err != nil {
+			// Wrapping in a fatal error because further processing is futile
 			err = fmt.Errorf("%v: %w", err, errFatal)
 		}
 		return err
@@ -497,6 +506,7 @@ func RunMain(cmd *cobra.Command, dir string) {
 			return
 		}
 		l.Errorf("Error happened while searching for results directory: %v\n", err)
+		os.Exit(1)
 	}
 
 	if err := waitForLog(cmd.Context()); err != nil {
@@ -504,24 +514,27 @@ func RunMain(cmd *cobra.Command, dir string) {
 			return
 		}
 		l.Errorf("Failed waiting for %s with error: %v\n", simulationLogFileName, err)
+		os.Exit(1)
 	}
 
 	wg := &sync.WaitGroup{}
 	pCtx, pCancel := context.WithCancel(context.Background())
-	cCtx, cCancel := context.WithCancel(context.Background())
+	iCtx, iCancel := context.WithCancel(context.Background())
 
 	wg.Add(2)
 	go parseStart(pCtx, wg)
-	go influx.StartProcessing(cCtx, wg)
+	go influx.StartProcessing(iCtx, wg)
 
 FinisherLoop:
 	for {
 		select {
+		// If top level context is cancelled we first stop the parser
 		case <-cmd.Context().Done():
 			pCancel()
+		// Then wait for parser to stop and stop client processing
 		case <-parserStopped:
-			cCancel()
-			// Closing context if not canceled before
+			iCancel()
+			// In case parser finished processing on its own, we cancel its context
 			pCancel()
 			break FinisherLoop
 		}

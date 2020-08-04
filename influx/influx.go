@@ -50,10 +50,6 @@ type userLineData struct {
 	status    string
 }
 
-const (
-	userMetricsTicker = 1
-)
-
 var (
 	c         infc.Client
 	dbName    string
@@ -355,13 +351,18 @@ func StartProcessing(ctx context.Context, owg *sync.WaitGroup) {
 	// Wait for external stop signal
 	<-ctx.Done()
 
-	l.Infoln("Stopping all consumers...")
+	l.Infoln("Stopping all points processor...")
 	upCancel()
 	mpcCancel() // This should be the last one
 
 	wg.Wait()
 	sendClosingPoint()
-	l.Infoln("Finishing process")
+	l.Infoln("Points processor finished")
+
+	err := CloseDBConnection()
+	if err != nil {
+		l.Errorf("Failed to close DB connection: %v", err)
+	}
 }
 
 // InitInfluxConnection establishes connection to InfluxDB database
@@ -399,7 +400,13 @@ func InitInfluxConnection(cmd *cobra.Command) error {
 	}
 	if !detached {
 		l.Infof("Connection with InfluxDB at %s successfully established\n", address)
+		return nil
 	}
 
-	return nil
+	return CloseDBConnection()
+}
+
+// CloseDBConnection just closes a connection to database when called
+func CloseDBConnection() error {
+	return c.Close()
 }
