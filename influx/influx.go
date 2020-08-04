@@ -1,5 +1,5 @@
 /*
-Copyright © 2019 Anton Kramarev
+Copyright © 2020 Anton Kramarev
 
 Permission is hereby granted, free of charge, to any person obtaining a copy
 of this software and associated documentation files (the "Software"), to deal
@@ -25,12 +25,11 @@ package influx
 import (
 	"context"
 	"fmt"
-	"log"
 	"runtime"
 	"sync"
 	"time"
 
-	"github.com/dakaraj/gatling-to-influxdb/logger"
+	l "github.com/dakaraj/gatling-to-influxdb/logger"
 	_ "github.com/influxdata/influxdb1-client" // workaround from client documentation
 	client "github.com/influxdata/influxdb1-client/v2"
 	infc "github.com/influxdata/influxdb1-client/v2"
@@ -57,7 +56,6 @@ const (
 
 var (
 	c         infc.Client
-	l         *log.Logger
 	dbName    string
 	info      testInfo
 	lastPoint time.Time
@@ -69,7 +67,7 @@ var (
 	uc = make(chan userLineData, 1000)
 
 	// TODO: parameterize later
-	writeDataTimeout = 10
+	writeDataTimeout = 5
 )
 
 // InitTestInfo collect basic test information to be used by Influx client
@@ -109,10 +107,10 @@ SendLoop:
 	for {
 		err := c.Write(bp)
 		if err != nil {
-			l.Printf("Error sending points batch to InfluxDB: %v\n", err)
+			l.Errorf("Error sending points batch to InfluxDB: %v\n", err)
 			errCounter++
 			if errCounter == retries {
-				l.Printf("Failed to send %d points as batch to server\n", len(points))
+				l.Errorf("Failed to send %d points as batch to server\n", len(points))
 				return
 			}
 			time.Sleep(2 * time.Second)
@@ -121,11 +119,11 @@ SendLoop:
 	}
 
 	if errCounter > 0 {
-		l.Printf("%d points successfully sent after %d retries\n", len(points), errCounter)
+		l.Infof("%d points successfully sent after %d retries\n", len(points), errCounter)
 		return
 	}
 
-	l.Printf("Successfully written %d points to DB\n", len(points))
+	l.Debugf("Successfully written %d points to DB\n", len(points))
 }
 
 // SendUserLineData takes a line with user data and adds it to the processing list
@@ -197,7 +195,7 @@ CollectorLoop:
 				// Collect remaining points
 				pts, err := sendUserData(usersMap, secondFrom)
 				if err != nil {
-					l.Printf("Failed to send user data: %v", err)
+					l.Errorf("Failed to send user data: %v", err)
 					continue
 				}
 				points = append(points, pts...)
@@ -254,7 +252,7 @@ CollectorLoop:
 				// And send data for previous range
 				points, err := sendUserData(usersMap, secondFrom)
 				if err != nil {
-					l.Printf("Failed to send user data: %v", err)
+					l.Errorf("Failed to send user data: %v", err)
 					continue
 				}
 				for _, p := range points {
@@ -316,7 +314,7 @@ func sendClosingPoint() {
 	// If info struct is empty, then parsing of file did not start,
 	// so there is no need to send closing point
 	if info.testStartTime.IsZero() {
-		l.Println("Skipping stop test point write...")
+		l.Infoln("Skipping stop test point write...")
 		return
 	}
 
@@ -344,7 +342,7 @@ func sendClosingPoint() {
 func StartProcessing(ctx context.Context, owg *sync.WaitGroup) {
 	defer owg.Done()
 
-	l.Println("Starting consumers for parser results")
+	l.Infoln("Starting consumers for parser results")
 	wg := &sync.WaitGroup{}
 
 	// start requests consumer
@@ -357,25 +355,24 @@ func StartProcessing(ctx context.Context, owg *sync.WaitGroup) {
 	// Wait for external stop signal
 	<-ctx.Done()
 
-	l.Println("Stopping all consumers...")
+	l.Infoln("Stopping all consumers...")
 	upCancel()
 	mpcCancel() // This should be the last one
 
 	wg.Wait()
 	sendClosingPoint()
-	l.Println("Finishing process")
+	l.Infoln("Finishing process")
 }
 
-// InitInfluxConnection checks if connection with InfluxDB is successful
+// InitInfluxConnection establishes connection to InfluxDB database
+// and checks if it is successful
 func InitInfluxConnection(cmd *cobra.Command) error {
-	// Getting logger for package
-	l = logger.GetLogger()
-
 	username, _ := cmd.Flags().GetString("username")
 	password, _ := cmd.Flags().GetString("password")
 	address, _ := cmd.Flags().GetString("address")
 	dbName, _ = cmd.Flags().GetString("database")
 	maxPoints, _ = cmd.Flags().GetUint("max-batch-size")
+	detached, _ := cmd.Flags().GetBool("detached")
 
 	var err error
 	c, err = infc.NewHTTPClient(infc.HTTPConfig{
@@ -400,7 +397,9 @@ func InitInfluxConnection(cmd *cobra.Command) error {
 	if err := res.Error(); err != nil {
 		return fmt.Errorf("Test query failed with error: %w", err)
 	}
-	l.Printf("Connection with InfluxDB at %s successfully established\n", address)
+	if !detached {
+		l.Infof("Connection with InfluxDB at %s successfully established\n", address)
+	}
 
 	return nil
 }

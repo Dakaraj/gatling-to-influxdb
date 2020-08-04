@@ -1,5 +1,5 @@
 /*
-Copyright © 2019 Anton Kramarev
+Copyright © 2020 Anton Kramarev
 
 Permission is hereby granted, free of charge, to any person obtaining a copy
 of this software and associated documentation files (the "Software"), to deal
@@ -29,7 +29,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"log"
 	"math/rand"
 	"os"
 	"path/filepath"
@@ -40,7 +39,7 @@ import (
 	"time"
 
 	"github.com/dakaraj/gatling-to-influxdb/influx"
-	"github.com/dakaraj/gatling-to-influxdb/logger"
+	l "github.com/dakaraj/gatling-to-influxdb/logger"
 
 	// infc "github.com/influxdata/influxdb1-client/v2"
 	"github.com/spf13/cobra"
@@ -58,7 +57,6 @@ const (
 )
 
 var (
-	l                    *log.Logger
 	resultDirNamePattern = regexp.MustCompile(`^.+?-(\d{14})\d{3}$`)
 	start                = time.Now().Unix()
 	nodeName             string
@@ -107,7 +105,7 @@ func lookupTargetDir(ctx context.Context, dir string) error {
 		}
 
 		abs, _ := filepath.Abs(dir)
-		l.Printf("Target directory found at %s", abs)
+		l.Infof("Target directory found at %s", abs)
 		break
 	}
 
@@ -120,7 +118,7 @@ func walkFunc(path string, info os.FileInfo, err error) error {
 		t, _ := time.Parse("20060102150405", dateString)
 		if t.Unix() > start {
 			logDir = path
-			l.Printf("Found log directory at %s", logDir)
+			l.Infof("Found log directory at %s", logDir)
 
 			return errFound
 		}
@@ -135,7 +133,7 @@ func walkFunc(path string, info os.FileInfo, err error) error {
 // is parsed and  result timestamp is matched against application start time.
 // Function stops as soon as matched date time is higher then initial one
 func lookupResultsDir(ctx context.Context, dir string) error {
-	l.Println("Searching for results directory...")
+	l.Infof("Searching for results directory...")
 	for {
 		// This block checks if stop signal is received from user
 		// and stops further lookup
@@ -160,7 +158,7 @@ func lookupResultsDir(ctx context.Context, dir string) error {
 }
 
 func waitForLog(ctx context.Context) error {
-	l.Println("Searching for " + simulationLogFileName + " file...")
+	l.Infoln("Searching for " + simulationLogFileName + " file...")
 	for {
 		// This block checks if stop signal is received from user
 		// and stops further lookup
@@ -181,7 +179,7 @@ func waitForLog(ctx context.Context) error {
 		// WARNING: second part of this check may fail on Windows. Not tested
 		if fInfo.Mode().IsRegular() && (runtime.GOOS == "windows" || fInfo.Mode().Perm() == 420) {
 			abs, _ := filepath.Abs(logDir + "/" + simulationLogFileName)
-			l.Printf("Found %s\n", abs)
+			l.Infof("Found %s\n", abs)
 			break
 		}
 
@@ -290,7 +288,7 @@ func groupLineProcess(lb []byte) error {
 	if err != nil {
 		return fmt.Errorf("Failed to parse group raw duration in line as integer: %w", err)
 	}
-	timestamp, err := timeFromUnixBytes(split[5])
+	timestamp, err := timeFromUnixBytes(split[4])
 	if err != nil {
 		return err
 	}
@@ -422,7 +420,7 @@ ParseLoop:
 		// and stops further processing
 		select {
 		case <-ctx.Done():
-			l.Println("Parser received closing signal. Processing stopped")
+			l.Infoln("Parser received closing signal. Processing stopped")
 			break ParseLoop
 		default:
 		}
@@ -431,7 +429,7 @@ ParseLoop:
 		if err == io.EOF {
 			// If no new lines read for more than value provided by 'stop-timeout' key then processing is stopped
 			if time.Now().After(startWait.Add(time.Duration(waitTime) * time.Second)) {
-				l.Printf("No new lines found for %d seconds. Stopping application...", waitTime)
+				l.Infof("No new lines found for %d seconds. Stopping application...", waitTime)
 				break ParseLoop
 			}
 			// All new data is stored in buffer until next loop
@@ -440,15 +438,15 @@ ParseLoop:
 			continue
 		}
 		if err != nil {
-			l.Printf("Unexpected error encountered while parsing file: %v", err)
+			l.Errorf("Unexpected error encountered while parsing file: %v", err)
 		}
 
 		buf.Write(b)
 		err = stringProcessor(buf.Bytes())
 		if err != nil {
-			l.Printf("String processing failed: %v", err)
+			l.Errorf("String processing failed: %v", err)
 			if errors.Is(err, errFatal) {
-				l.Println("Log parser caught an error that can't be handled. Stopping application...")
+				l.Errorln("Log parser caught an error that can't be handled. Stopping application...")
 				break ParseLoop
 			}
 		}
@@ -463,10 +461,10 @@ ParseLoop:
 func parseStart(ctx context.Context, wg *sync.WaitGroup) {
 	defer wg.Done()
 
-	l.Println("Starting log file parser...")
+	l.Infoln("Starting log file parser...")
 	file, err := os.Open(logDir + "/" + simulationLogFileName)
 	if err != nil {
-		l.Fatalf("Failed to read %s file: %v\n", simulationLogFileName, err)
+		l.Errorf("Failed to read %s file: %v\n", simulationLogFileName, err)
 	}
 	defer file.Close()
 
@@ -475,30 +473,37 @@ func parseStart(ctx context.Context, wg *sync.WaitGroup) {
 
 // RunMain performs main application logic
 func RunMain(cmd *cobra.Command, dir string) {
-	// Getting logger for package
-	l = logger.GetLogger()
-
 	testID, _ = cmd.Flags().GetString("test-id")
 	waitTime, _ = cmd.Flags().GetUint("stop-timeout")
 	rand.Seed(time.Now().UnixNano())
 	nodeName, _ = os.Hostname()
 
-	l.Printf("Searching for directory at %s", dir)
+	l.Infof("Searching for directory at %s", dir)
 	abs, err := filepath.Abs(dir)
 	if err != nil {
-		l.Fatalf("Failed to construct an absolute path for %s: %v", dir, err)
+		l.Errorf("Failed to construct an absolute path for %s: %v", dir, err)
 	}
 
 	if err := lookupTargetDir(cmd.Context(), abs); err != nil {
-		l.Fatalf("Target directory lookup failed with error: %v\n", err)
+		if err == errStoppedByUser {
+			return
+		}
+		l.Errorf("Target directory lookup failed with error: %v\n", err)
+		os.Exit(1)
 	}
 
 	if err := lookupResultsDir(cmd.Context(), abs); err != nil {
-		l.Fatalf("Error happened while searching for results directory: %v\n", err)
+		if err == errStoppedByUser {
+			return
+		}
+		l.Errorf("Error happened while searching for results directory: %v\n", err)
 	}
 
 	if err := waitForLog(cmd.Context()); err != nil {
-		l.Fatalf("Failed waiting for %s with error: %v\n", simulationLogFileName, err)
+		if err == errStoppedByUser {
+			return
+		}
+		l.Errorf("Failed waiting for %s with error: %v\n", simulationLogFileName, err)
 	}
 
 	wg := &sync.WaitGroup{}
