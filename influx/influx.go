@@ -110,6 +110,7 @@ SendLoop:
 				return
 			}
 			time.Sleep(2 * time.Second)
+			continue
 		}
 		break SendLoop
 	}

@@ -43,16 +43,16 @@ var (
 )
 
 func preRunSetup(cmd *cobra.Command, args []string) error {
-	// // Workaround for a mandatory testid (t) flag
-	// if t, _ := cmd.Flags().GetString("test-id"); t == "" {
-	// 	fmt.Print("Test identifier is not provided. Please provide some value with --testid (-t) flag\n\n")
-	// 	cmd.Help()
-	// 	os.Exit(1)
-	// }
-	// // End of workaround
+	// Initialize application logger as soon as flags are parsed
+	logPath, _ := cmd.Flags().GetString("log")
+	err := l.InitLogger(logPath)
+	if err != nil {
+		// Stop application if logger can't be initialized
+		return fmt.Errorf("Failed to init application logger: %w", err)
+	}
 
 	// Check if InfluxDB connection is successfull before going to detached mode
-	err := influx.InitInfluxConnection(cmd)
+	err = influx.InitInfluxConnection(cmd)
 	if err != nil {
 		return fmt.Errorf("Failed to establish successful database connection: %w", err)
 	}
@@ -114,16 +114,8 @@ complications of Graphite protocol.`,
 // Execute adds all child commands to the root command and sets flags appropriately.
 // This is called by main.main(). It only needs to happen once to the rootCmd.
 func Execute() {
-	// Initiating logger before any other processes start
-	logPath, _ := rootCmd.Flags().GetString("log")
-	err := l.InitLogger(logPath)
-	if err != nil {
-		log.Fatalf("Failed to init application logger: %v\n", err)
-	}
-
 	if err := rootCmd.ExecuteContext(ctx); err != nil {
-		l.Errorln(err)
-		os.Exit(1)
+		log.Fatalln(err)
 	}
 }
 
