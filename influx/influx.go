@@ -50,6 +50,12 @@ type userLineData struct {
 	status    string
 }
 
+type users struct {
+    active  int
+    started int
+    ended   int
+}
+
 var (
 	c         infc.Client
 	dbName    string
@@ -63,7 +69,7 @@ var (
 	uc = make(chan userLineData, 1000)
 
 	// TODO: parameterize later
-	writeDataTimeout = 5
+	writeDataTimeout = 1
 )
 
 // InitTestInfo collect basic test information to be used by Influx client
@@ -129,7 +135,7 @@ func SendUserLineData(timestamp time.Time, scenario, status string) {
 	uc <- uld
 }
 
-func sendUserData(m map[string]int, ts time.Time) ([]*client.Point, error) {
+func sendUserData(m map[string]users, ts time.Time) ([]*client.Point, error) {
 	// Prepare points
 	points := make([]*client.Point, 0, len(m))
 	for k, v := range m {
@@ -141,7 +147,9 @@ func sendUserData(m map[string]int, ts time.Time) ([]*client.Point, error) {
 				"nodeName": info.nodeName,
 			},
 			map[string]interface{}{
-				"active": v,
+				"active": v.active,
+				"started": v.started,
+				"ended": v.ended,
 			},
 			ts,
 		)
@@ -158,7 +166,7 @@ func sendUserData(m map[string]int, ts time.Time) ([]*client.Point, error) {
 
 func usersProcessor(ctx context.Context, wg *sync.WaitGroup) {
 	// Send current user state to database each N seconds
-	const timeRangeLen = 5
+	const timeRangeLen = 1
 	defer wg.Done()
 
 	// Workaround:
@@ -172,7 +180,7 @@ func usersProcessor(ctx context.Context, wg *sync.WaitGroup) {
 
 	secondFrom := info.testStartTime.Round(time.Second)
 	secondTo := secondFrom.Add(time.Second * timeRangeLen)
-	usersMap := make(map[string]int)
+	usersMap := make(map[string]users)
 
 CollectorLoop:
 	for {
@@ -218,12 +226,18 @@ CollectorLoop:
 				// If point is somehow from the past
 				if p.timestamp.Before(secondFrom) {
 					// Then we just update the map
+					usersMapValues := usersMap[p.scenario]
+
 					switch p.status {
 					case "START":
-						usersMap[p.scenario]++
+						usersMapValues.active++
+						usersMapValues.started++
 					case "END":
-						usersMap[p.scenario]--
+						usersMapValues.active--
+						usersMapValues.ended++
 					}
+
+                    usersMap[p.scenario] = usersMapValues
 
 					break SearcherLoop
 				}
@@ -232,12 +246,18 @@ CollectorLoop:
 				// If timestamp is a part of the current time range
 				if (p.timestamp.After(secondFrom) || p.timestamp.Equal(secondFrom)) && p.timestamp.Before(secondTo) {
 					// We update the map
+					usersMapValues := usersMap[p.scenario]
+
 					switch p.status {
 					case "START":
-						usersMap[p.scenario]++
+						usersMapValues.active++
+						usersMapValues.started++
 					case "END":
-						usersMap[p.scenario]--
+						usersMapValues.active--
+						usersMapValues.ended++
 					}
+
+                    usersMap[p.scenario] = usersMapValues
 
 					break SearcherLoop
 				}

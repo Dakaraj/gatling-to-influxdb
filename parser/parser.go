@@ -50,9 +50,9 @@ const (
 	simulationLogFileName = "simulation.log"
 	// Constant amounts of elements per log line
 	runLineLen     = 6
-	requestLineLen = 8
-	groupLineLen   = 7
-	userLineLen    = 6
+	requestLineLen = 7
+	groupLineLen   = 6
+	userLineLen    = 4
 	errorLineLen   = 3
 )
 
@@ -215,12 +215,12 @@ func userLineProcess(lb []byte) error {
 	scenario := string(split[1])
 	// Using the second of the two timestamps
 	// A user life duration may come in handy later
-	timestamp, err := timeFromUnixBytes(bytes.TrimSpace(split[5]))
+	timestamp, err := timeFromUnixBytes(bytes.TrimSpace(split[3]))
 	if err != nil {
 		return err
 	}
 
-	influx.SendUserLineData(timestamp, scenario, string(split[3]))
+	influx.SendUserLineData(timestamp, scenario, string(split[2]))
 
 	return nil
 }
@@ -231,19 +231,19 @@ func requestLineProcess(lb []byte) error {
 		return errors.New("REQUEST line contains unexpected amount of values")
 	}
 
-	userID, err := strconv.ParseInt(string(split[1]), 10, 32)
-	if err != nil {
-		return fmt.Errorf("Failed to parse userID in line as integer: %w", err)
-	}
-	start, err := strconv.ParseInt(string(split[4]), 10, 64)
+// 	userID, err := strconv.ParseInt(string(split[1]), 10, 32)
+// 	if err != nil {
+// 		return fmt.Errorf("Failed to parse userID in line as integer: %w", err)
+// 	}
+	start, err := strconv.ParseInt(string(split[3]), 10, 64)
 	if err != nil {
 		return fmt.Errorf("Failed to parse request start time in line as integer: %w", err)
 	}
-	end, err := strconv.ParseInt(string(split[5]), 10, 64)
+	end, err := strconv.ParseInt(string(split[4]), 10, 64)
 	if err != nil {
 		return fmt.Errorf("Failed to parse request end time in line as integer: %w", err)
 	}
-	timestamp, err := timeFromUnixBytes(split[5])
+	timestamp, err := timeFromUnixBytes(split[4])
 	if err != nil {
 		return err
 	}
@@ -251,17 +251,16 @@ func requestLineProcess(lb []byte) error {
 	point, err := influx.NewPoint(
 		"requests",
 		map[string]string{
-			"name":       string(split[3]),
-			"groups":     string(split[2]),
-			"result":     string(split[6]),
+			"name":       string(split[2]),
+			"groups":     string(split[1]),
+			"result":     string(split[5]),
 			"simulation": simulationName,
 			"testId":     testID,
 			"nodeName":   nodeName,
 		},
 		map[string]interface{}{
-			"userId":       int(userID),
 			"duration":     int(end - start),
-			"errorMessage": string(bytes.TrimSpace(split[7])),
+			"errorMessage": string(bytes.TrimSpace(split[6])),
 		},
 		timestamp,
 	)
@@ -280,23 +279,19 @@ func groupLineProcess(lb []byte) error {
 		return errors.New("GROUP line contains unexpected amount of values")
 	}
 
-	userID, err := strconv.ParseInt(string(split[1]), 10, 32)
-	if err != nil {
-		return fmt.Errorf("Failed to parse userID in line as integer: %w", err)
-	}
-	start, err := strconv.ParseInt(string(split[3]), 10, 64)
+	start, err := strconv.ParseInt(string(split[2]), 10, 64)
 	if err != nil {
 		return fmt.Errorf("Failed to parse group start time in line as integer: %w", err)
 	}
-	end, err := strconv.ParseInt(string(split[4]), 10, 64)
+	end, err := strconv.ParseInt(string(split[3]), 10, 64)
 	if err != nil {
 		return fmt.Errorf("Failed to parse group end time in line as integer: %w", err)
 	}
-	rawDuration, err := strconv.ParseInt(string(split[5]), 10, 32)
+	rawDuration, err := strconv.ParseInt(string(split[4]), 10, 32)
 	if err != nil {
 		return fmt.Errorf("Failed to parse group raw duration in line as integer: %w", err)
 	}
-	timestamp, err := timeFromUnixBytes(split[4])
+	timestamp, err := timeFromUnixBytes(split[3])
 	if err != nil {
 		return err
 	}
@@ -304,14 +299,13 @@ func groupLineProcess(lb []byte) error {
 	point, err := influx.NewPoint(
 		"groups",
 		map[string]string{
-			"name":       string(split[2]),
-			"result":     string(split[6][:2]),
+			"name":       string(split[1]),
+			"result":     string(split[5][:2]),
 			"simulation": simulationName,
 			"testId":     testID,
 			"nodeName":   nodeName,
 		},
 		map[string]interface{}{
-			"userId":        int(userID),
 			"totalDuration": int(end - start),
 			"rawDuration":   int(rawDuration),
 		},
